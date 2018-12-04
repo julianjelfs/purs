@@ -35,6 +35,8 @@ import           Language.PureScript.AST
 import qualified Language.PureScript.Bundle as Bundle
 import qualified Language.PureScript.CodeGen.JS as J
 import           Language.PureScript.CodeGen.JS.Printer
+import           Language.PureScript.CodeGen.Go as Go
+import           Language.PureScript.CodeGen.Go.Printer
 import qualified Language.PureScript.CoreFn as CF
 import qualified Language.PureScript.CoreFn.ToJSON as CFJ
 import qualified Language.PureScript.CoreImp.AST as Imp
@@ -178,6 +180,11 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
       lift $ do
         writeTextFile jsFile (B.fromStrict $ TE.encodeUtf8 $ js <> mapRef)
         when sourceMaps $ genSourceMap dir mapFile (length prefix) mappings
+    when (S.member Go codegenTargets) $ do
+      rawGo <- Go.moduleToGo m
+      let go = prettyPrintGo rawGo
+          goFile = targetFilename mn Go
+      lift (writeTextFile goFile (B.fromStrict $ TE.encodeUtf8 $ go))
 
   ffiCodegen :: CF.Module CF.Ann -> Make ()
   ffiCodegen m = do
