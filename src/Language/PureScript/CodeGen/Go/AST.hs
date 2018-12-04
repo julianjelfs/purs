@@ -1,31 +1,37 @@
 {-# OPTIONS -fno-warn-unused-top-binds #-}
 -- | https://golang.org/pkg/go/ast/
 module Language.PureScript.CodeGen.Go.AST
-    ( AST
+    ( Module(..)
 
     -- * Newtypes
-    , PackageName(PackageName)
-    , Import(Import)
-    , Identifier(Identifier)
+    , PackageName(..)
+    , Import(..)
+    , Identifier(..)
 
     , Stmnt(..)
-    )
-where
+    ) where
 
 import Prelude.Compat
 
 import Data.Text (Text)
 
 
-data AST
+data Module = Module
+    { modulePackageName :: PackageName
+    , moduleImports     :: [Import]
+    }
 
 
 -- | package fmt
-newtype PackageName = PackageName Text
+--
+-- https://golang.org/pkg/go/ast/#Package
+newtype PackageName = PackageName { packageName :: Text }
 
 
 -- | import "os"
-newtype Import = Import Text
+--
+-- https://golang.org/pkg/go/ast/#ImportSpec
+data Import = Import { importName :: Text, importPath :: Text }
 
 
 -- | foo
