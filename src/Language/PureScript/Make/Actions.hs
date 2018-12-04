@@ -134,6 +134,7 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
     JS -> outputFilename mn "index.js"
     JSSourceMap -> outputFilename mn "index.js.map"
     CoreFn -> outputFilename mn "corefn.json"
+    Go -> outputFilename mn "module.go"
 
   getOutputTimestamp :: ModuleName -> Make (Maybe UTCTime)
   getOutputTimestamp mn = do
