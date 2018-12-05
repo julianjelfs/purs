@@ -1,5 +1,6 @@
 module Language.PureScript.CodeGen.Go
-  ( moduleToGo
+  ( module Plumbing
+  , moduleToGo
   ) where
 
 --import Protolude (ordNub)
@@ -34,6 +35,7 @@ import Prelude.Compat
 
 import qualified Data.Text as Text
 import qualified Language.PureScript.CodeGen.Go.AST as Go
+import           Language.PureScript.CodeGen.Go.Plumbing as Plumbing
 import qualified Language.PureScript.CoreFn as CoreFn
 import qualified Language.PureScript.Names as Names
 
@@ -54,9 +56,10 @@ moduleToGo
      , MonadError MultipleErrors m
      )
   => CoreFn.Module CoreFn.Ann
+  -> FilePath
+  -- ^ Import path prefix (e.g. goModuleName/outputDir)
   -> m Go.Module
-moduleToGo core =
-    pure Go.Module {..}
+moduleToGo core importPrefix = pure Go.Module {..}
   where
     modulePackageName :: Go.PackageName
     modulePackageName =
@@ -64,7 +67,7 @@ moduleToGo core =
 
     moduleImports :: [Go.Import]
     moduleImports =
-        moduleNameToImport "todo/output" . snd <$> CoreFn.moduleImports core
+        moduleNameToImport importPrefix . snd <$> CoreFn.moduleImports core
 
 
 -- | "Control.Monad" -> "package Control_Monad"

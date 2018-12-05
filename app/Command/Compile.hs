@@ -20,6 +20,7 @@ import           Data.Traversable (for)
 import qualified Language.PureScript as P
 import           Language.PureScript.Errors.JSON
 import           Language.PureScript.Make
+import           Language.PureScript.CodeGen.Go (gomodInit)
 import qualified Options.Applicative as Opts
 import qualified System.Console.ANSI as ANSI
 import           System.Exit (exitSuccess, exitFailure)
@@ -71,6 +72,10 @@ compile PSCMakeOptions{..} = do
     let makeActions = buildMakeActions pscmOutputDir filePathMap foreigns pscmUsePrefix
     P.make makeActions (map snd ms)
   printWarningsAndErrors (P.optionsVerboseErrors pscmOpts) pscmJSONErrors makeWarnings makeErrors
+
+  when (S.member P.Go (P.optionsCodegenTargets pscmOpts)) $ do
+    gomodInit pscmOutputDir
+
   exitSuccess
 
 warnFileTypeNotFound :: String -> IO ()
