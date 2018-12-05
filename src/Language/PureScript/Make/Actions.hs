@@ -181,8 +181,8 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
         writeTextFile jsFile (B.fromStrict $ TE.encodeUtf8 $ js <> mapRef)
         when sourceMaps $ genSourceMap dir mapFile (length prefix) mappings
     when (S.member Go codegenTargets) $ do
-      (_, modFile) <- lift genGoModFile -- TODO: should only have to do this once
-      rawGo <- Go.moduleToGo m (T.unpack (Go.modFileModule modFile) </> outputDir)
+      let importPrefix = T.unpack (Go.modFileModule Go.defaultModFile) </> outputDir
+      rawGo <- Go.moduleToGo m (importPrefix </> outputDir)
       let go = prettyPrintGo rawGo
           goFile = targetFilename mn Go
       lift (writeTextFile goFile (B.fromStrict $ TE.encodeUtf8 $ go))
@@ -244,10 +244,6 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
     where
     mkdirp :: FilePath -> IO ()
     mkdirp = createDirectoryIfMissing True . takeDirectory
-
-  genGoModFile :: Make (FilePath, Go.ModFile)
-  genGoModFile = makeIO (const (ErrorMessage [] $ CannotGetFileInfo outputDir)) $
-      Go.generateModFile outputDir
 
   progress :: ProgressMessage -> Make ()
   progress = liftIO . putStrLn . renderProgressMessage

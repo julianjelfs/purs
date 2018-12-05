@@ -20,7 +20,7 @@ import           Data.Traversable (for)
 import qualified Language.PureScript as P
 import           Language.PureScript.Errors.JSON
 import           Language.PureScript.Make
-import           Language.PureScript.CodeGen.Go (gomodInit)
+import qualified Language.PureScript.CodeGen.Go as Go
 import qualified Options.Applicative as Opts
 import qualified System.Console.ANSI as ANSI
 import           System.Exit (exitSuccess, exitFailure)
@@ -74,7 +74,7 @@ compile PSCMakeOptions{..} = do
   printWarningsAndErrors (P.optionsVerboseErrors pscmOpts) pscmJSONErrors makeWarnings makeErrors
 
   when (S.member P.Go (P.optionsCodegenTargets pscmOpts)) $ do
-    gomodInit pscmOutputDir
+    Go.modInit Go.defaultModFile
 
   exitSuccess
 
