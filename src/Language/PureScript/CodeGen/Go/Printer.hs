@@ -28,12 +28,17 @@ prettyPrintGo :: Go.Module -> Text
 prettyPrintGo m = Text.intercalate "\n" $
     [ prettyPrintPackageName (Go.modulePackageName m)
     , blankLine
-    ] <> fmap prettyPrintImport (Go.moduleImports m) <>
-    [ blankLine
+    , "import ("
+    ] <> fmap (indent 1 . prettyPrintImport) (Go.moduleImports m) <>
+    [ ")"
+    , blankLine
     ]
   where
     blankLine :: Text
     blankLine = mempty
+
+    indent :: Int -> Text -> Text
+    indent n text = Text.replicate n "\t" <> text
 
 
 prettyPrintPackageName :: Go.PackageName -> Text
@@ -42,7 +47,7 @@ prettyPrintPackageName (Go.PackageName name) = "package " <> name
 
 prettyPrintImport :: Go.Import -> Text
 prettyPrintImport (Go.Import name path) =
-    Text.intercalate " " ["import", name, surround '"' '"' path]
+    name <> " " <> surround '"' '"' path
 
 
 surround :: Char -> Char -> Text -> Text
