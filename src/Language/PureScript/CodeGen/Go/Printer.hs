@@ -24,25 +24,22 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 
-prettyPrintGo :: Go.Module -> Text
-prettyPrintGo m = Text.intercalate "\n" $
-    [ prettyPrintPackageName (Go.modulePackageName m)
-    , blankLine
-    , "import ("
-    ] <> fmap (indent 1 . prettyPrintImport) (Go.moduleImports m) <>
-    [ ")"
-    , blankLine
+prettyPrintGo :: Go.File -> Text
+prettyPrintGo Go.File{..} = Text.intercalate "\n" $ mconcat
+    [ [ prettyPrintPackage filePackage
+      , mempty
+      , "import ("
+      ]
+    , indent 1 . prettyPrintImport <$> fileImports
+    , [ ")"
+      , mempty
+      ]
+    , prettyPrintDecl <$> fileDecls
     ]
-  where
-    blankLine :: Text
-    blankLine = mempty
-
-    indent :: Int -> Text -> Text
-    indent n text = Text.replicate n "\t" <> text
 
 
-prettyPrintPackageName :: Go.PackageName -> Text
-prettyPrintPackageName (Go.PackageName name) = "package " <> name
+prettyPrintPackage :: Go.Package -> Text
+prettyPrintPackage (Go.Package name) = "package " <> name
 
 
 prettyPrintImport :: Go.Import -> Text
@@ -50,5 +47,15 @@ prettyPrintImport (Go.Import name path) =
     name <> " " <> surround '"' '"' path
 
 
+prettyPrintDecl :: Go.Decl -> Text
+prettyPrintDecl = \case
+    Go.FuncDecl ident -> "func " <> Go.unIdent ident <> "() {}"
+    Go.TodoDecl ident -> "// TODO: " <> Go.unIdent ident
+
+
 surround :: Char -> Char -> Text -> Text
 surround before after = flip Text.snoc after . Text.cons before
+
+
+indent :: Int -> Text -> Text
+indent n text = Text.replicate n "\t" <> text

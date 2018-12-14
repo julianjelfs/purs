@@ -11,7 +11,6 @@ module Language.PureScript.CodeGen.Go
 --import Control.Monad.Reader (MonadReader, asks) import Data.List ((\\), intersect)
 --import qualified Data.Foldable as F
 --import qualified Data.Map as M
---import Data.Maybe (fromMaybe, isNothing)
 --import Data.String (fromString)
 --import Data.Text (Text)
 --import qualified Data.Text as T
@@ -34,6 +33,7 @@ module Language.PureScript.CodeGen.Go
 import Prelude.Compat
 
 import qualified Data.Text as Text
+import           Data.Maybe (mapMaybe)
 import qualified Language.PureScript.CodeGen.Go.AST as Go
 import           Language.PureScript.CodeGen.Go.Plumbing as Plumbing
 import qualified Language.PureScript.CoreFn as CoreFn
@@ -58,21 +58,24 @@ moduleToGo
   => CoreFn.Module CoreFn.Ann
   -> FilePath
   -- ^ Import path prefix (e.g. goModuleName/outputDir)
-  -> m Go.Module
-moduleToGo core importPrefix = pure Go.Module {..}
+  -> m Go.File
+moduleToGo core importPrefix = pure Go.File {..}
   where
-    modulePackageName :: Go.PackageName
-    modulePackageName =
-        moduleNameToPackageName (CoreFn.moduleName core)
+    filePackage :: Go.Package
+    filePackage =
+        moduleNameToPackage (CoreFn.moduleName core)
 
-    moduleImports :: [Go.Import]
-    moduleImports =
+    fileImports :: [Go.Import]
+    fileImports =
         moduleNameToImport importPrefix . snd <$> CoreFn.moduleImports core
+
+    fileDecls :: [Go.Decl]
+    fileDecls = processDecls (CoreFn.moduleDecls core)
 
 
 -- | "Control.Monad" -> "package Control_Monad"
-moduleNameToPackageName :: Names.ModuleName -> Go.PackageName
-moduleNameToPackageName = Go.PackageName . runProperName' "_"
+moduleNameToPackage :: Names.ModuleName -> Go.Package
+moduleNameToPackage mn = Go.Package (runProperName' "_" mn)
 
 
 moduleNameToImport :: FilePath -> Names.ModuleName -> Go.Import
@@ -80,10 +83,33 @@ moduleNameToImport dir mn =
     Go.Import (runProperName' "_" mn) (addDir dir (Names.runModuleName mn))
 
 
+processDecls :: [CoreFn.Bind CoreFn.Ann] -> [Go.Decl]
+processDecls = concatMap $ \case
+    CoreFn.NonRec ann ident expr ->
+        maybe [] (:[]) (processDecl ann ident expr)
+
+    CoreFn.Rec rec ->
+        mapMaybe (uncurry . uncurry $ processDecl) rec
+
+
+processDecl
+    :: CoreFn.Ann
+    -> Names.Ident
+    -> CoreFn.Expr CoreFn.Ann
+    -> Maybe Go.Decl
+processDecl _ (Names.GenIdent _ _)  _  = Nothing
+processDecl _  Names.UnusedIdent    _ = Nothing
+
+processDecl _ann (Names.Ident ident) _expr =
+    Just (Go.TodoDecl (Go.Ident ident))
+
+
+-- | Join proper names with the given separator.
 runProperName' :: Text -> Names.ModuleName -> Text
 runProperName' sep (Names.ModuleName pns) =
     Text.intercalate sep (Names.runProperName <$> pns)
 
 
+-- | Add a directory name to a file path.
 addDir :: FilePath -> Text -> Text
 addDir dir base = Text.pack (dir </> Text.unpack base)

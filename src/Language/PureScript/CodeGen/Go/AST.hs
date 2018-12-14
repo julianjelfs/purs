@@ -1,14 +1,13 @@
 {-# OPTIONS -fno-warn-unused-top-binds #-}
 -- | https://golang.org/pkg/go/ast/
 module Language.PureScript.CodeGen.Go.AST
-    ( Module(..)
+    ( File(..)
 
-    -- * Newtypes
-    , PackageName(..)
+    , Decl(..)
+    , Package(..)
     , Import(..)
-    , Identifier(..)
-
-    , Stmnt(..)
+    , publicIdent
+    , Ident(..)
     ) where
 
 import Prelude.Compat
@@ -16,26 +15,53 @@ import Prelude.Compat
 import Data.Text (Text)
 
 
-data Module = Module
-    { modulePackageName :: PackageName
-    , moduleImports     :: [Import]
+data File = File
+    { filePackage  :: Package
+    , fileImports  :: [Import]
+    , fileDecls    :: [Decl]
     }
 
 
 -- | package fmt
 --
 -- https://golang.org/pkg/go/ast/#Package
-newtype PackageName = PackageName { packageName :: Text }
+newtype Package = Package
+    { packageName :: Text
+    }
 
 
 -- | import "os"
 --
 -- https://golang.org/pkg/go/ast/#ImportSpec
-data Import = Import { importName :: Text, importPath :: Text }
+data Import = Import
+    { importName :: Text
+    , importPath :: Text
+    }
+
+
+data Decl
+    = FuncDecl Ident
+    | TodoDecl Ident
+
+
+-- | func foo(x int, y int) { .. }
+data Func = Func
+    { funcName      :: Ident
+    , funcArgs      :: [(Ident, Type)]
+    , funcReturn    :: [(Ident, Type)]
+    , funcBody      :: Expr
+    }
+
+
+data Type = AnyType
 
 
 -- | foo
-newtype Identifier = Identifier Text
+newtype Ident = Ident { unIdent :: Text }
+
+
+publicIdent :: Ident -> Ident
+publicIdent = id  -- TODO
 
 
 -- | Go Statement.
@@ -54,7 +80,7 @@ data Expr
     | CallExpr Expr [Expr]
     -- ^ foo(bar, 2, baz)
 
-    | VarExpr Identifier
+    | VarExpr Ident
     -- ^ foo
 
     | UnaryExpr Expr Expr
