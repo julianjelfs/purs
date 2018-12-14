@@ -38,10 +38,12 @@ import qualified Language.PureScript.CodeGen.Go.AST as Go
 import           Language.PureScript.CodeGen.Go.Plumbing as Plumbing
 import qualified Language.PureScript.CoreFn as CoreFn
 import qualified Language.PureScript.Names as Names
+import qualified Language.PureScript.Constants as Constants
 
 import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.Text (Text)
+import Data.Function ((&))
 import Control.Monad.Reader (MonadReader)
 import Control.Monad.Supply.Class (MonadSupply)
 import Language.PureScript.Errors (MultipleErrors)
@@ -67,10 +69,15 @@ moduleToGo core importPrefix = pure Go.File {..}
 
     fileImports :: [Go.Import]
     fileImports =
-        moduleNameToImport importPrefix . snd <$> CoreFn.moduleImports core
+        moduleNameToImport importPrefix . snd <$> moduleImports' core
 
     fileDecls :: [Go.Decl]
     fileDecls = processDecls (CoreFn.moduleDecls core)
+
+
+moduleImports' :: CoreFn.Module CoreFn.Ann -> [(CoreFn.Ann, Names.ModuleName)]
+moduleImports' core = CoreFn.moduleImports core &
+    filter (\(_, mn) -> mn /= CoreFn.moduleName core && mn `notElem` Constants.primModules)
 
 
 -- | "Control.Monad" -> "package Control_Monad"

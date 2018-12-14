@@ -22,15 +22,13 @@ data File = File
     }
 
 
--- | package fmt
+-- | e.g. package fmt
 --
 -- https://golang.org/pkg/go/ast/#Package
-newtype Package = Package
-    { packageName :: Text
-    }
+newtype Package = Package { packageName :: Text }
 
 
--- | import "os"
+-- | e.g. import "os"
 --
 -- https://golang.org/pkg/go/ast/#ImportSpec
 data Import = Import
@@ -44,7 +42,7 @@ data Decl
     | TodoDecl Ident
 
 
--- | func foo(x int, y int) { .. }
+-- | e.g. func foo(x int, y int) { .. }
 data Func = Func
     { funcName      :: Ident
     , funcArgs      :: [(Ident, Type)]
