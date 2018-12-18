@@ -1,31 +1,45 @@
 {-# OPTIONS -fno-warn-unused-top-binds #-}
 -- | https://golang.org/pkg/go/ast/
 module Language.PureScript.CodeGen.Go.AST
-    ( File(..)
-
-    , Decl(..)
-    , Package(..)
+    ( Package(..)
+    , File(..)
     , Import(..)
+    , Decl(..)
+    , Func(..)
+    , Signature(..)
+    , Type(..)
+    , BasicType(..)
+    , Struct(..)
+
+    , Ident
+    , unIdent
     , publicIdent
-    , Ident(..)
+    , privateIdent
+    , localIdent
+    , Expr(..)
     ) where
 
 import Prelude.Compat
 
+import qualified Language.PureScript.AST.Literals as PS (Literal)
+
 import Data.Text (Text)
 
 
+-- |
+--
+-- e.g. package fmt
+--
+-- https://golang.org/pkg/go/ast/#Package
+newtype Package = Package { packageName :: Text }
+
+
+-- | A single Go source file.
 data File = File
     { filePackage  :: Package
     , fileImports  :: [Import]
     , fileDecls    :: [Decl]
     }
-
-
--- | e.g. package fmt
---
--- https://golang.org/pkg/go/ast/#Package
-newtype Package = Package { packageName :: Text }
 
 
 -- | e.g. import "os"
@@ -37,29 +51,80 @@ data Import = Import
     }
 
 
+-- | A top-level declaration.
 data Decl
-    = FuncDecl Ident
+    = FuncDecl Ident Func
+    | TypeDecl Ident Type
+
+    -- TODO
+    | VarDecl
+    | ConstDecl
     | TodoDecl Ident
 
 
--- | e.g. func foo(x int, y int) { .. }
 data Func = Func
-    { funcName      :: Ident
-    , funcArgs      :: [(Ident, Type)]
-    , funcReturn    :: [(Ident, Type)]
+    { funcSignature :: Signature
     , funcBody      :: Expr
     }
 
 
-data Type = AnyType
+data Signature = Signature
+    { signatureParams  :: [(Ident, Type)]
+    , signatureResults :: [Type]
+    }
+
+
+data Type
+    = BasicType BasicType
+    | StructType Struct
+    | EmptyInterfaceType
+
+    -- FIXME
+    | UnknownType String
+
+
+-- |
+--
+-- https://tour.golang.org/basics/11
+data BasicType
+    = BoolType       -- ^ bool
+    | StringType     -- ^ string
+    | IntType        -- ^ int
+    | Int8Type       -- ^ int8
+    | Int16Type      -- ^ int16
+    | Int32Type      -- ^ int32
+    | Int64Type      -- ^ int64
+    | UintType       -- ^ uint
+    | Uint8Type      -- ^ uint8
+    | Uint16Type     -- ^ uint16
+    | Uint32Type     -- ^ uint32
+    | Uint64Type     -- ^ uint64
+    | UintPtrType    -- ^ uintptr
+    | RuneType       -- ^ rune
+    | Float32Type    -- ^ float32
+    | Float64Type    -- ^ float64
+    | Complex64Type  -- ^ complex64
+    | Complex128Type -- ^ complex128
+
+
+-- |
+newtype Struct = Struct { structFields :: [ (Ident, Type) ]}
 
 
 -- | foo
 newtype Ident = Ident { unIdent :: Text }
 
 
-publicIdent :: Ident -> Ident
-publicIdent = id  -- TODO
+publicIdent :: Text -> Ident
+publicIdent ident = Ident ("Public_" <> ident)
+
+
+privateIdent :: Text -> Ident
+privateIdent ident = Ident ("private_" <> ident)
+
+
+localIdent :: Text -> Ident
+localIdent = Ident
 
 
 -- | Go Statement.
@@ -72,8 +137,7 @@ data Stmnt
 
 -- | Go expression.
 data Expr
-    = LiteralExpr Literal
-    -- ^ 42, 0x7f, 3.14, 1e-9, 2.4i, 'a', '\x7f', "foo" or `\m\n\o`
+    = LiteralExpr (PS.Literal Expr)
 
     | CallExpr Expr [Expr]
     -- ^ foo(bar, 2, baz)
@@ -90,14 +154,4 @@ data Expr
     | NilExpr
     -- ^ nil
 
-
--- | Go literal.
-data Literal
-    = StringLiteral Text
-    -- ^ "foo"
-
-    | IntLiteral Int
-    -- ^ 42
-
-    | FloatLiteral Double
-    -- ^ 42.0
+    | TodoExpr
