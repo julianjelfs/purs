@@ -38,15 +38,16 @@ printGoDecl (Go.FuncDecl ident func) =
   printGoFunc (Just ident) func
 printGoDecl (Go.TypeDecl ident gotype) =
   "type " <> Go.unIdent ident <> " " <> printGoType gotype <> ";"
-printGoDecl _ = ""
+printGoDecl (Go.TodoDecl ident) =
+  "// TODO: " <> Go.unIdent ident
 
 
 printGoFunc :: Maybe Go.Ident -> Go.Func -> Text
 printGoFunc mbIdent Go.Func {..} = Text.concat
   ["func ", maybe "" Go.unIdent mbIdent
-  , printGoSignature printGoParam funcSignature, " {\n"
+  , printGoSignature printGoField funcSignature, " {\n"
   --                                                ^^
-  --                    NOTE: Adding a blank line here for the benefit of gofmt
+  --                    NOTE: Adding a blank line here so gofmt works nicely
   , "return ", printGoExpr funcBody, ";"
   , "};"
   ]
@@ -58,18 +59,10 @@ printGoSignature printParam Go.Signature {..} =
   "(" <> Text.intercalate "," (printGoType <$> signatureResults) <> ")"
 
 
--- | Print an identifier and the type of that identifier, separated by a single space.
---
--- This syntax is used for both function signatures and struct types.
-printGoParam :: (Go.Ident, Go.Type) -> Text
-printGoParam (ident, gotype) = Go.unIdent ident <> " " <> printGoType gotype
-
-
 printGoExpr :: Go.Expr -> Text
 printGoExpr (Go.LiteralExpr literal) = printGoLiteral literal
 printGoExpr (Go.FuncExpr func) = printGoFunc Nothing func
 printGoExpr (Go.TodoExpr what) = "/* TODO: " <> showT what <> "*/"
-printGoExpr _ = "/* TODO: ??? */"
 
 
 printGoLiteral :: Go.Literal -> Text
@@ -80,12 +73,19 @@ printGoLiteral = \case
   (Go.CharLiteral char)    -> showT char
   (Go.BoolLiteral bool)    -> if bool then "true" else "false"
 
-  (Go.SliceLiteral sliceType items) ->
+  (Go.SliceLiteral itemType items) ->
     Text.concat
-        [ printGoType sliceType, "{"
-        , Text.intercalate "," (printGoExpr <$> items)
-        , "}"
-        ]
+      [ "[]", printGoType itemType, "{"
+      , Text.intercalate "," (printGoExpr <$> items)
+      , "}"
+      ]
+
+  (Go.StructLiteral struct keyvalues) ->
+    Text.concat
+      [ printGoStruct struct, "{"
+      , Text.intercalate "," (printGoKeyValue Go.unIdent <$> keyvalues)
+      , "}"
+      ]
 
 
 printGoType :: Go.Type -> Text
@@ -111,13 +111,18 @@ printGoType (Go.BasicType basic) =
     Go.Complex128Type -> "complex128"
 printGoType (Go.StructType struct) =
   printGoStruct struct
+
 printGoType (Go.FuncType signature) =
   "func" <> printGoSignature printGoType signature
+
 printGoType (Go.SliceType itemType) =
   "[]" <> printGoType itemType
+
 printGoType (Go.MapType keyType itemType) =
   "map[" <> printGoType keyType <> "]" <> printGoType itemType
-printGoType Go.EmptyInterfaceType = "interface{}"
+
+printGoType Go.EmptyInterfaceType =
+  "interface{}"
 
 -- FIXME
 printGoType (Go.UnknownType what) =
@@ -126,7 +131,19 @@ printGoType (Go.UnknownType what) =
 
 printGoStruct :: Go.Struct -> Text
 printGoStruct Go.Struct { structFields } =
-  "struct{\n" <> Text.intercalate ";" (printGoParam <$> structFields) <> "}"
+  "struct{\n" <> Text.intercalate ";" (printGoField <$> structFields) <> "}"
+
+
+-- | foo: "bar"
+--
+printGoKeyValue :: (k -> Text) -> Go.KeyValue k -> Text
+printGoKeyValue p (k, v) = p k <> ":" <> printGoExpr v
+
+
+-- | foo string
+--
+printGoField :: Go.Field -> Text
+printGoField (ident, gotype) = Go.unIdent ident <> " " <> printGoType gotype
 
 
 showT :: Show a => a -> Text

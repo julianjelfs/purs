@@ -1,23 +1,33 @@
-{-# OPTIONS -fno-warn-unused-top-binds #-}
--- | https://golang.org/pkg/go/ast/
+{-
+    https://golang.org/pkg/go/ast/
+-}
 module Language.PureScript.CodeGen.Go.AST
-    ( Package(..)
-    , File(..)
+    ( File(..)
+    , Package(..)
     , Import(..)
     , Decl(..)
-    , Func(..)
-    , Signature(..)
+
+    -- * Expressions
+    , Expr(..)
+    , Literal(..)
+    , KeyValue
+    , Field
+
+    -- * Types
     , Type(..)
     , BasicType(..)
+
+    -- * ???
+    , Func(..)
+    , Signature(..)
     , Struct(..)
 
+    -- * Identifiers
     , Ident
     , unIdent
     , publicIdent
     , privateIdent
     , localIdent
-    , Expr(..)
-    , Literal(..)
     ) where
 
 import Prelude.Compat
@@ -25,20 +35,19 @@ import Prelude.Compat
 import Data.Text (Text)
 
 
--- |
---
--- e.g. package fmt
---
--- https://golang.org/pkg/go/ast/#Package
-newtype Package = Package { packageName :: Text }
-
-
 -- | A single Go source file.
+--
 data File = File
     { filePackage  :: Package
     , fileImports  :: [Import]
     , fileDecls    :: [Decl]
     }
+
+
+-- | Package name.
+--
+-- https://golang.org/pkg/go/ast/#Package
+newtype Package = Package { packageName :: Text }
 
 
 -- | Go package import.
@@ -56,16 +65,16 @@ data Import = Import
 data Decl
     = FuncDecl Ident Func
     | TypeDecl Ident Type
+    | TodoDecl Ident
 
     -- TODO
-    | VarDecl
-    | ConstDecl
-    | TodoDecl Ident
+    -- | VarDecl  <- probably always want to use const!
+    -- | ConstDecl
 
 
 -- | Go function abstraction.
 data Func = Func
-    { funcSignature :: Signature (Ident, Type)
+    { funcSignature :: Signature Field
     , funcBody      :: Expr
     }
 
@@ -73,8 +82,8 @@ data Func = Func
 -- | Go function signature
 --
 -- (the part after the "func" keyword and function binder)
-data Signature param = Signature
-    { signatureParams  :: [param]
+data Signature par = Signature
+    { signatureParams  :: [par]
     , signatureResults :: [Type]
     }
 
@@ -93,7 +102,7 @@ data Type
     | UnknownType String
 
 
--- | Go's most basic (primitive) types.
+-- | Go's fundamental primitives.
 --
 -- https://tour.golang.org/basics/11
 data BasicType
@@ -123,7 +132,7 @@ data BasicType
 --      foo int
 --      bar string
 --  }
-newtype Struct = Struct { structFields :: [ (Ident, Type) ]}
+newtype Struct = Struct { structFields :: [Field] }
 
 
 -- | Go expression.
@@ -131,23 +140,6 @@ newtype Struct = Struct { structFields :: [ (Ident, Type) ]}
 data Expr
     = LiteralExpr Literal
     | FuncExpr Func
-
-
-    | CallExpr Expr [Expr]
-    -- ^ foo(bar, 2, baz)
-
-    | VarExpr Ident
-    -- ^ foo
-
-    | UnaryExpr Expr Expr
-    -- ^ -5
-
-    | BinaryExpr Expr Expr
-    -- ^ 1 + 2
-
-    | NilExpr
-    -- ^ nil
-
     -- FIXME
     | TodoExpr String
 
@@ -159,6 +151,17 @@ data Literal
     | CharLiteral Char
     | BoolLiteral Bool
     | SliceLiteral Type [Expr]
+    | StructLiteral Struct [KeyValue Ident]
+
+
+-- | key: value
+--
+type KeyValue k = (k, Expr)
+
+
+-- | foo string
+--
+type Field = (Ident, Type)
 
 
 -- IDENTIFIERS

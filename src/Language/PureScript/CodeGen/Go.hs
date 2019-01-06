@@ -18,10 +18,12 @@ import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.Text (Text)
 import Data.Function ((&))
+import Data.Bifunctor (bimap)
 import Control.Monad.Reader (MonadReader)
 import Control.Monad.Supply.Class (MonadSupply)
 import Language.PureScript.Errors (MultipleErrors)
 import Language.PureScript.Options (Options)
+import Language.PureScript.PSString (PSString)
 
 
 moduleToGo
@@ -129,10 +131,26 @@ literalToGo ann = \case
   Literals.BooleanLiteral bool           -> Go.BoolLiteral bool
 
   Literals.ArrayLiteral items ->
-    Go.SliceLiteral (maybe undefined typeToGo $ annType ann) (valueToGo <$> items)
+    case typeToGo <$> annType ann of
+      Just (Go.SliceType itemType) ->
+        Go.SliceLiteral itemType (valueToGo <$> items)
+      Just _ ->
+        error ("CodeGen.Go.literalToGo: bad array type: " <> show (annType ann))
+      Nothing ->
+        error "CodeGen.Go.literalToGo: missing array type"
 
-  Literals.ObjectLiteral _keyvalues ->
-    undefined -- TODO
+  Literals.ObjectLiteral keyValues ->
+    Go.StructLiteral
+      (Go.Struct (bimap psStringToIdent exprType <$> keyValues))
+      (bimap psStringToIdent valueToGo <$> keyValues)
+    where
+      psStringToIdent :: PSString -> Go.Ident
+      psStringToIdent = Go.localIdent . narrowT 1 . showT
+      --                                ^^^^^^^^^
+      --                    Need to remove surrounding quotes
+
+      exprType :: CoreFn.Expr CoreFn.Ann -> Go.Type
+      exprType = maybeTypeToGo . annType . CoreFn.extractAnn
 
 
 structFields :: [(Names.Ident, Maybe Types.Type)] -> [(Go.Ident, Go.Type)]
@@ -218,3 +236,7 @@ addDir dir base = Text.pack (dir </> Text.unpack base)
 
 showT :: Show a => a -> Text
 showT = Text.pack . show
+
+
+narrowT :: Int -> Text -> Text
+narrowT i = Text.dropEnd i . Text.drop i
