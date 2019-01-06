@@ -36,7 +36,7 @@ import qualified Language.PureScript.Bundle as Bundle
 import qualified Language.PureScript.CodeGen.JS as J
 import           Language.PureScript.CodeGen.JS.Printer
 import           Language.PureScript.CodeGen.Go as Go
-import           Language.PureScript.CodeGen.Go.Printer
+import           Language.PureScript.CodeGen.Go.Printer (printGo)
 import qualified Language.PureScript.CoreFn as CF
 import qualified Language.PureScript.CoreFn.ToJSON as CFJ
 import qualified Language.PureScript.CoreImp.AST as Imp
@@ -183,7 +183,7 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
     when (S.member Go codegenTargets) $ do
       let importPrefix = T.unpack (Go.modFileModule Go.defaultModFile)
       rawGo <- Go.moduleToGo m (importPrefix </> outputDir)
-      let go = prettyPrintGo rawGo
+      let go = printGo rawGo
           goFile = targetFilename mn Go
       lift (writeTextFile goFile (B.fromStrict $ TE.encodeUtf8 $ go))
 

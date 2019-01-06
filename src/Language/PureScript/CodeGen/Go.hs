@@ -3,33 +3,6 @@ module Language.PureScript.CodeGen.Go
   , moduleToGo
   ) where
 
---import Protolude (ordNub)
---
---import Control.Arrow ((&&&))
---import Control.Monad (forM, replicateM, void)
---import Control.Monad.Except (MonadError, throwError)
---import Control.Monad.Reader (MonadReader, asks) import Data.List ((\\), intersect)
---import qualified Data.Foldable as F
---import qualified Data.Map as M
---import Data.String (fromString)
---import Data.Text (Text)
---import qualified Data.Text as T
---
---import Language.PureScript.AST.SourcePos
---import Language.PureScript.CodeGen.JS.Common as Common
---import Language.PureScript.CoreImp.AST (AST, everywhereTopDownM, withSourceSpan)
---import qualified Language.PureScript.CoreImp.AST as AST
---import Language.PureScript.CoreImp.Optimizer
---import Language.PureScript.Crash
---import Language.PureScript.Errors (ErrorMessageHint(..), SimpleErrorMessage(..),
---                                   MultipleErrors(..), rethrow, errorMessage,
---                                   errorMessage', rethrowWithPosition, addHint)
---import Language.PureScript.Names
---import Language.PureScript.PSString (PSString, mkString)
---import Language.PureScript.Traversals (sndM)
---import qualified Language.PureScript.Constants as C
---
-
 import Prelude.Compat
 
 import qualified Data.Text as Text
@@ -39,12 +12,12 @@ import qualified Language.PureScript.CoreFn as CoreFn
 import qualified Language.PureScript.Names as Names
 import qualified Language.PureScript.Constants as Constants
 import qualified Language.PureScript.Types as Types
+import qualified Language.PureScript.AST.Literals as Literals
 
 import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.Text (Text)
 import Data.Function ((&))
-import Data.Maybe (fromMaybe)
 import Control.Monad.Reader (MonadReader)
 import Control.Monad.Supply.Class (MonadSupply)
 import Language.PureScript.Errors (MultipleErrors)
@@ -111,58 +84,55 @@ nonRecToGo
   -> Names.Ident
   -> CoreFn.Expr CoreFn.Ann
   -> [Go.Decl]
-nonRecToGo exports _ann ident expr =
+nonRecToGo exports _ ident expr =
   case expr of
     CoreFn.Abs (_, _, _, Just CoreFn.IsTypeClassConstructor) _ _ ->
-      let goIdent =
+      let structName =
             if ident `elem` exports
             then Go.publicIdent (runIdent ident)
             else Go.privateIdent (runIdent ident)
 
           struct = Go.Struct (structFields $ unAbs expr)
 
-      in [ Go.TypeDecl goIdent (Go.StructType struct) ]
+      in [ Go.TypeDecl structName (Go.StructType struct) ]
 
-    CoreFn.Abs ann' arg body ->
-      let func = Go.Func
-            { funcSignature = Go.Signature
-                { signatureParams = case arg of
-                    Names.Ident name ->
-                      [ ( Go.localIdent name
-                        , maybeTypeToGo $ annType ann'
-                        )
-                      ]
-
-                    Names.GenIdent name n ->
-                      [ ( Go.localIdent $ "gen__" <> fromMaybe "" name <> showT n
-                        , maybeTypeToGo $ annType ann'
-                        )
-                      ]
-
-                    Names.UnusedIdent ->
-                      []
-                , signatureResults = []
-                }
-            , funcBody = valueToGo body
-            }
-
-          goIdent =
+    CoreFn.Abs ann arg body ->
+      let funcName =
             if ident `elem` exports
             then Go.publicIdent (runIdent ident)
             else Go.privateIdent (runIdent ident)
 
-      in [ Go.FuncDecl goIdent func ]
+          func = absToFunc ann arg body
+
+       in [ Go.FuncDecl funcName func ]
 
     _ ->
+      -- TODO
       [ Go.TodoDecl (Go.privateIdent $ runIdent ident) ]
 
 
 valueToGo :: CoreFn.Expr CoreFn.Ann -> Go.Expr
 valueToGo = \case
-  CoreFn.Literal _ann literal ->
-    Go.LiteralExpr (valueToGo <$> literal)
+  CoreFn.Literal ann literal -> Go.LiteralExpr (literalToGo ann literal)
+  CoreFn.Abs ann arg body    -> Go.FuncExpr (absToFunc ann arg body)
 
-  _ -> Go.TodoExpr
+  -- FIXME
+  expr -> Go.TodoExpr (show expr)
+
+
+literalToGo :: CoreFn.Ann -> Literals.Literal (CoreFn.Expr CoreFn.Ann) -> Go.Literal
+literalToGo ann = \case
+  Literals.NumericLiteral (Left integer) -> Go.IntLiteral integer
+  Literals.NumericLiteral (Right double) -> Go.FloatLiteral double
+  Literals.StringLiteral psString        -> Go.StringLiteral (showT psString)
+  Literals.CharLiteral char              -> Go.CharLiteral char
+  Literals.BooleanLiteral bool           -> Go.BoolLiteral bool
+
+  Literals.ArrayLiteral items ->
+    Go.SliceLiteral (maybe undefined typeToGo $ annType ann) (valueToGo <$> items)
+
+  Literals.ObjectLiteral _keyvalues ->
+    undefined -- TODO
 
 
 structFields :: [(Names.Ident, Maybe Types.Type)] -> [(Go.Ident, Go.Type)]
@@ -176,7 +146,47 @@ maybeTypeToGo = maybe Go.EmptyInterfaceType typeToGo
 
 
 typeToGo :: Types.Type -> Go.Type
-typeToGo ty = Go.UnknownType (show ty) -- FIXME
+typeToGo (x :-> y) = Go.FuncType (Go.Signature [typeToGo x] [typeToGo y])
+
+-- Primitive types
+typeToGo (PrimType "Boolean") = Go.BasicType Go.BoolType
+typeToGo (PrimType "Int")     = Go.BasicType Go.IntType
+typeToGo (PrimType "Number")  = Go.BasicType Go.Float64Type
+typeToGo (PrimType "String")  = Go.BasicType Go.StringType
+typeToGo (PrimType "Char")    = Go.BasicType Go.RuneType -- ???
+
+typeToGo (Types.TypeApp (PrimType "Array") itemType) = Go.SliceType (typeToGo itemType)
+
+-- FIXME
+typeToGo ty = Go.UnknownType (show ty)
+
+
+pattern PrimType :: Text -> Types.Type
+pattern PrimType t <-
+  Types.TypeConstructor (Names.Qualified (Just (Names.ModuleName [Names.ProperName "Prim"])) (Names.ProperName t))
+
+
+-- | Infix pattern synonym to make matching function types nicer.
+pattern (:->) :: Types.Type -> Types.Type -> Types.Type
+pattern lhs :-> rhs <-
+  Types.TypeApp (Types.TypeApp (PrimType "Function") lhs) rhs
+
+
+absToFunc :: CoreFn.Ann -> Names.Ident -> (CoreFn.Expr CoreFn.Ann) -> Go.Func
+absToFunc ann ident expr = case annType ann of
+  Just (argType :-> returnType) -> Go.Func
+    { funcSignature = curriedSignature (ident, argType) returnType
+    , funcBody      = valueToGo expr
+    }
+  Just bad -> error ("CodeGen.Go.absToFunc: bad abs type: " <> show bad)
+  Nothing  -> error "CodeGen.Go.absToFunc: untyped function"
+
+
+curriedSignature :: (Names.Ident, Types.Type) -> Types.Type -> Go.Signature (Go.Ident, Go.Type)
+curriedSignature (argName, argType) returnType = Go.Signature
+  { signatureParams  = [ (Go.localIdent (runIdent argName), typeToGo argType) ]
+  , signatureResults = [ typeToGo returnType ]
+  }
 
 
 unAbs :: CoreFn.Expr CoreFn.Ann -> [(Names.Ident, Maybe Types.Type)]

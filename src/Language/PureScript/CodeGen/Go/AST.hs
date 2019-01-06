@@ -17,11 +17,10 @@ module Language.PureScript.CodeGen.Go.AST
     , privateIdent
     , localIdent
     , Expr(..)
+    , Literal(..)
     ) where
 
 import Prelude.Compat
-
-import qualified Language.PureScript.AST.Literals as PS (Literal)
 
 import Data.Text (Text)
 
@@ -42,16 +41,18 @@ data File = File
     }
 
 
--- | e.g. import "os"
+-- | Go package import.
 --
 -- https://golang.org/pkg/go/ast/#ImportSpec
 data Import = Import
-    { importName :: Text
-    , importPath :: Text
+    -- import alias "path"
+    { importAlias :: Text
+    , importPath  :: Text
     }
 
 
--- | A top-level declaration.
+-- | Top-level declaration.
+--
 data Decl
     = FuncDecl Ident Func
     | TypeDecl Ident Type
@@ -62,28 +63,37 @@ data Decl
     | TodoDecl Ident
 
 
+-- | Go function abstraction.
 data Func = Func
-    { funcSignature :: Signature
+    { funcSignature :: Signature (Ident, Type)
     , funcBody      :: Expr
     }
 
 
-data Signature = Signature
-    { signatureParams  :: [(Ident, Type)]
+-- | Go function signature
+--
+-- (the part after the "func" keyword and function binder)
+data Signature param = Signature
+    { signatureParams  :: [param]
     , signatureResults :: [Type]
     }
 
 
+-- | Go type.
+--
 data Type
     = BasicType BasicType
     | StructType Struct
-    | EmptyInterfaceType
+    | FuncType (Signature Type)
+    | SliceType Type
+    | MapType Type Type
+    | EmptyInterfaceType -- ^ this gives us crude polymorphism
 
     -- FIXME
     | UnknownType String
 
 
--- |
+-- | Go's most basic (primitive) types.
 --
 -- https://tour.golang.org/basics/11
 data BasicType
@@ -107,37 +117,21 @@ data BasicType
     | Complex128Type -- ^ complex128
 
 
--- |
+-- | Go's primitive product type.
+--
+-- struct {
+--      foo int
+--      bar string
+--  }
 newtype Struct = Struct { structFields :: [ (Ident, Type) ]}
 
 
--- | foo
-newtype Ident = Ident { unIdent :: Text }
-
-
-publicIdent :: Text -> Ident
-publicIdent ident = Ident ("Public_" <> ident)
-
-
-privateIdent :: Text -> Ident
-privateIdent ident = Ident ("private_" <> ident)
-
-
-localIdent :: Text -> Ident
-localIdent = Ident
-
-
--- | Go Statement.
-data Stmnt
-    = AssignStmt [Expr] [Expr]
-    -- ^
-    -- x := 5
-    -- x, err := foo()
-
-
 -- | Go expression.
+--
 data Expr
-    = LiteralExpr (PS.Literal Expr)
+    = LiteralExpr Literal
+    | FuncExpr Func
+
 
     | CallExpr Expr [Expr]
     -- ^ foo(bar, 2, baz)
@@ -154,4 +148,47 @@ data Expr
     | NilExpr
     -- ^ nil
 
-    | TodoExpr
+    -- FIXME
+    | TodoExpr String
+
+
+data Literal
+    = IntLiteral Integer
+    | FloatLiteral Double
+    | StringLiteral Text
+    | CharLiteral Char
+    | BoolLiteral Bool
+    | SliceLiteral Type [Expr]
+
+
+-- IDENTIFIERS
+
+
+-- | Go identifier.
+--
+newtype Ident = Ident { unIdent :: Text }
+
+
+-- NOTE: Go exports identifiers that being with a Capital letter. There is no
+-- explicit export list as in Haskell or Javascript. Hence identifiers have to
+-- be constructed with some knowledge of visibility, which is why the following
+-- three functions exist.
+
+
+-- | Expose an identifier.
+--
+publicIdent :: Text -> Ident
+publicIdent ident = Ident ("Public_" <> ident)
+
+
+-- | Hide an identifier.
+--
+privateIdent :: Text -> Ident
+privateIdent ident = Ident ("private_" <> ident)
+
+
+-- | Create an identifier that doesn't care about it's package visibility.
+--
+-- For example: a binding in a function signature.
+localIdent :: Text -> Ident
+localIdent = Ident

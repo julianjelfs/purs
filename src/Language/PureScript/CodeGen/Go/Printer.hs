@@ -1,228 +1,133 @@
+{-# LANGUAGE NamedFieldPuns #-}
+{-
+    NOTE: Not making any attempt to pretty print here as gofmt can do a much
+    better job of that.
+-}
 module Language.PureScript.CodeGen.Go.Printer
-  ( prettyPrintGo
+  ( printGo
   ) where
 
 import Prelude.Compat
 
 import qualified Language.PureScript.CodeGen.Go.AST as Go
-import qualified Control.Monad.State as State
 import qualified Data.Text as Text
-import qualified Control.Arrow as Arrow
-import qualified Language.PureScript.Pretty.Common as Pretty
-import qualified Control.PatternArrows as PatternArrows
 
-import Control.Arrow ((<+>))
-import Control.Monad.State (StateT, evalStateT)
 import Data.Text (Text)
-import Language.PureScript.Crash (internalError)
 
 
-prettyPrintGo
-  :: Go.File
-  -> Text
-prettyPrintGo =
-    maybe (internalError "Incomplete pattern") Pretty.runPlainString
-  . flip evalStateT (Pretty.PrinterState 0)
-  . prettyFile
+printGo :: Go.File -> Text
+printGo Go.File {..} = Text.concat $
+  (printGoPackage     filePackage) :
+  (printGoImport  <$> fileImports) <>
+  (printGoDecl'   <$> fileDecls)
+  where printGoDecl' = (<>"\n\n") . printGoDecl
 
 
-prettyFile
-  :: Pretty.Emit gen
-  => Go.File
-  -> StateT Pretty.PrinterState Maybe gen
-prettyFile file = do
-  header <- packageHeader (Go.filePackage file)
-  imports <- importsBlock (Go.fileImports file)
-  decls <- traverse prettyPrintDecl (Go.fileDecls file)
-  pure $ Pretty.intercalate (Pretty.emit newline) (header : imports : decls)
+printGoPackage :: Go.Package -> Text
+printGoPackage Go.Package { packageName } =
+  "package " <> packageName <> ";"
 
 
-packageHeader
-  :: Pretty.Emit gen
-  => Go.Package
-  -> StateT Pretty.PrinterState Maybe gen
-packageHeader (Go.Package name) =
-  line (Pretty.emit "package " <> Pretty.emit name)
+printGoImport :: Go.Import -> Text
+printGoImport Go.Import {..} =
+  "import " <> importAlias <> " " <> importPath <> ";"
 
 
-importsBlock
-  :: Pretty.Emit gen
-  => [Go.Import]
-  -> StateT Pretty.PrinterState Maybe gen
-importsBlock imports = do
-  open <- line (Pretty.emit "import (")
-  specs <- mconcat <$> traverse (withIndent . line . Pretty.emit . spec) imports
-  close <- line (Pretty.emit ")")
-  pure (open <> specs <> close)
-  where
-    spec :: Go.Import -> Text
-    spec (Go.Import name path) = name <> " \"" <> path <> "\""
+printGoDecl :: Go.Decl -> Text
+printGoDecl (Go.FuncDecl ident func) =
+  printGoFunc (Just ident) func
+printGoDecl (Go.TypeDecl ident gotype) =
+  "type " <> Go.unIdent ident <> " " <> printGoType gotype <> ";"
+printGoDecl _ = ""
 
 
-prettyPrintDecl
-  :: forall gen. Pretty.Emit gen
-  => Go.Decl
-  -> StateT Pretty.PrinterState Maybe gen
-prettyPrintDecl (Go.FuncDecl name func) =
-  prettyPrintFunc (Just name) func
-
-prettyPrintDecl (Go.TypeDecl name gotype) = do
-  prettyType <- prettyPrintType gotype
-  line $
-    Pretty.emit "type " <> Pretty.emit (Go.unIdent name <> " ") <> prettyType
-
-prettyPrintDecl Go.VarDecl =
-  line $
-    Pretty.emit "// var"
-
-prettyPrintDecl Go.ConstDecl =
-  line $
-    Pretty.emit "// const"
-
-prettyPrintDecl (Go.TodoDecl ident) =
-  line $
-    Pretty.emit "// TODO: " <> Pretty.emit (Go.unIdent ident)
+printGoFunc :: Maybe Go.Ident -> Go.Func -> Text
+printGoFunc mbIdent Go.Func {..} = Text.concat
+  ["func ", maybe "" Go.unIdent mbIdent
+  , printGoSignature printGoParam funcSignature, " {\n"
+  --                                                ^^
+  --                    NOTE: Adding a blank line here for the benefit of gofmt
+  , "return ", printGoExpr funcBody, ";"
+  , "};"
+  ]
 
 
-prettyPrintExpr
-  :: forall gen. Pretty.Emit gen
-  => Go.Expr
-  -> StateT Pretty.PrinterState Maybe gen
-prettyPrintExpr = Arrow.runKleisli $ PatternArrows.runPattern matchValue
-  where
-  matchValue :: PatternArrows.Pattern Pretty.PrinterState Go.Expr gen
-  matchValue = PatternArrows.buildPrettyPrinter
-    operators (literals <+> fmap Pretty.parensPos matchValue)
-
-  operators :: PatternArrows.OperatorTable Pretty.PrinterState Go.Expr gen
-  operators = PatternArrows.OperatorTable []
+printGoSignature :: (param -> Text) -> Go.Signature param -> Text
+printGoSignature printParam Go.Signature {..} =
+  "(" <> Text.intercalate "," (printParam  <$> signatureParams)  <> ")" <>
+  "(" <> Text.intercalate "," (printGoType <$> signatureResults) <> ")"
 
 
-prettyPrintFunc
-  :: forall gen. Pretty.Emit gen
-  => Maybe Go.Ident
-  -> Go.Func
-  -> StateT Pretty.PrinterState Maybe gen
-prettyPrintFunc name func = do
-  sig <- prettyPrintSignature (Go.funcSignature func)
-  open <- line $
-    Pretty.emit "func " <>
-    Pretty.emit (maybe "" Go.unIdent name) <>
-    sig <>
-    Pretty.emit " {"
-  body <- withIndent $ prettyPrintExpr (Go.funcBody func)
-  close <- line (Pretty.emit "}")
-  pure (open <> body <> close)
+-- | Print an identifier and the type of that identifier, separated by a single space.
+--
+-- This syntax is used for both function signatures and struct types.
+printGoParam :: (Go.Ident, Go.Type) -> Text
+printGoParam (ident, gotype) = Go.unIdent ident <> " " <> printGoType gotype
 
 
-prettyPrintSignature
-  :: forall gen. Pretty.Emit gen
-  => Go.Signature
-  -> StateT Pretty.PrinterState Maybe gen
-prettyPrintSignature sig = do
-    params <- traverse prettyPrintParam (Go.signatureParams sig)
-    results <- traverse prettyPrintType (Go.signatureResults sig)
-    pure $
-      Pretty.parensPos (Pretty.intercalate (Pretty.emit ", ") params) <>
-      case results of
-        [] -> Pretty.emit ""
-        [result] -> result
-        _ -> Pretty.intercalate (Pretty.emit ",") results
+printGoExpr :: Go.Expr -> Text
+printGoExpr (Go.LiteralExpr literal) = printGoLiteral literal
+printGoExpr (Go.FuncExpr func) = printGoFunc Nothing func
+printGoExpr (Go.TodoExpr what) = "/* TODO: " <> showT what <> "*/"
+printGoExpr _ = "/* TODO: ??? */"
 
 
-prettyPrintParam
-  :: forall gen. Pretty.Emit gen
-  => (Go.Ident, Go.Type)
-  -> StateT Pretty.PrinterState Maybe gen
-prettyPrintParam (ident, ty) = do
-  prettyType <- prettyPrintType ty
-  pure (Pretty.emit (Go.unIdent ident) <> Pretty.emit " " <> prettyType)
+printGoLiteral :: Go.Literal -> Text
+printGoLiteral = \case
+  (Go.IntLiteral integer)  -> showT integer
+  (Go.FloatLiteral double) -> showT double
+  (Go.StringLiteral text)  -> text
+  (Go.CharLiteral char)    -> showT char
+  (Go.BoolLiteral bool)    -> if bool then "true" else "false"
+
+  (Go.SliceLiteral sliceType items) ->
+    Text.concat
+        [ printGoType sliceType, "{"
+        , Text.intercalate "," (printGoExpr <$> items)
+        , "}"
+        ]
 
 
-prettyPrintType
-  :: forall gen. Pretty.Emit gen
-  => Go.Type
-  -> StateT Pretty.PrinterState Maybe gen
-prettyPrintType (Go.BasicType basic) = case basic of
-   Go.BoolType       -> pure $ Pretty.emit "bool"
-   Go.StringType     -> pure $ Pretty.emit "string"
-   Go.IntType        -> pure $ Pretty.emit "int"
-   Go.Int8Type       -> pure $ Pretty.emit "int8"
-   Go.Int16Type      -> pure $ Pretty.emit "int16"
-   Go.Int32Type      -> pure $ Pretty.emit "int32"
-   Go.Int64Type      -> pure $ Pretty.emit "int64"
-   Go.UintType       -> pure $ Pretty.emit "uint"
-   Go.Uint8Type      -> pure $ Pretty.emit "uint8"
-   Go.Uint16Type     -> pure $ Pretty.emit "uint16"
-   Go.Uint32Type     -> pure $ Pretty.emit "uint32"
-   Go.Uint64Type     -> pure $ Pretty.emit "uint64"
-   Go.UintPtrType    -> pure $ Pretty.emit "uintptr"
-   Go.RuneType       -> pure $ Pretty.emit "rune"
-   Go.Float32Type    -> pure $ Pretty.emit "float32"
-   Go.Float64Type    -> pure $ Pretty.emit "float64"
-   Go.Complex64Type  -> pure $ Pretty.emit "complex64"
-   Go.Complex128Type -> pure $ Pretty.emit "complex128"
-
-prettyPrintType (Go.StructType struct) =
-  prettyPrintStruct struct
-
-prettyPrintType Go.EmptyInterfaceType =
-  pure $ Pretty.emit "interface{}"
+printGoType :: Go.Type -> Text
+printGoType (Go.BasicType basic) =
+  case basic of
+    Go.BoolType       -> "bool"
+    Go.StringType     -> "string"
+    Go.IntType        -> "int"
+    Go.Int8Type       -> "int8"
+    Go.Int16Type      -> "int16"
+    Go.Int32Type      -> "int32"
+    Go.Int64Type      -> "int64"
+    Go.UintType       -> "uint"
+    Go.Uint8Type      -> "uint8"
+    Go.Uint16Type     -> "uint16"
+    Go.Uint32Type     -> "uint32"
+    Go.Uint64Type     -> "uint64"
+    Go.UintPtrType    -> "uintptr"
+    Go.RuneType       -> "rune"
+    Go.Float32Type    -> "float32"
+    Go.Float64Type    -> "float64"
+    Go.Complex64Type  -> "complex64"
+    Go.Complex128Type -> "complex128"
+printGoType (Go.StructType struct) =
+  printGoStruct struct
+printGoType (Go.FuncType signature) =
+  "func" <> printGoSignature printGoType signature
+printGoType (Go.SliceType itemType) =
+  "[]" <> printGoType itemType
+printGoType (Go.MapType keyType itemType) =
+  "map[" <> printGoType keyType <> "]" <> printGoType itemType
+printGoType Go.EmptyInterfaceType = "interface{}"
 
 -- FIXME
-prettyPrintType (Go.UnknownType what) =
-  pure $ Pretty.emit ("interface{} /* " <> Text.pack what <> "*/")
+printGoType (Go.UnknownType what) =
+  "interface{} /* " <> Text.pack what <> "*/"
 
 
-prettyPrintStruct
-  :: forall gen. Pretty.Emit gen
-  => Go.Struct
-  -> StateT Pretty.PrinterState Maybe gen
-prettyPrintStruct struct = do
-    fields <- traverse (withIndent . prettyPrintField) (Go.structFields struct)
-    pure $
-      Pretty.emit "struct {" <> Pretty.emit newline <>
-      mconcat fields <>
-      Pretty.emit "}"
-  where
-  prettyPrintField :: (Go.Ident, Go.Type) -> StateT Pretty.PrinterState Maybe gen
-  prettyPrintField (ident, gotype) = do
-    prettyType <- prettyPrintType gotype
-    line (Pretty.emit (Go.unIdent ident) <> Pretty.emit " " <> prettyType)
+printGoStruct :: Go.Struct -> Text
+printGoStruct Go.Struct { structFields } =
+  "struct{\n" <> Text.intercalate ";" (printGoParam <$> structFields) <> "}"
 
 
-literals
-  :: forall gen. Pretty.Emit gen
-  => PatternArrows.Pattern Pretty.PrinterState Go.Expr gen
-literals = PatternArrows.mkPattern' match
-  where
-  match :: Go.Expr -> StateT Pretty.PrinterState Maybe gen
-  match _ = line (Pretty.emit "// TODO")
-
-
-line :: Pretty.Emit gen => gen -> StateT Pretty.PrinterState Maybe gen
-line gen = (\indent -> indent <> gen <> Pretty.emit newline) <$> currentIndent
-
-
-currentIndent :: Pretty.Emit gen => StateT Pretty.PrinterState Maybe gen
-currentIndent = do
-  n <- State.gets Pretty.indent
-  pure (Pretty.emit $ Text.replicate n tab)
-
-
-withIndent
-  :: StateT Pretty.PrinterState Maybe gen
-  -> StateT Pretty.PrinterState Maybe gen
-withIndent action = do
-  State.modify $ \s -> s { Pretty.indent = succ (Pretty.indent s) }
-  result <- action
-  State.modify $ \s -> s { Pretty.indent = pred (Pretty.indent s) }
-  pure result
-
-
-tab :: Text
-tab = "\t"
-
-
-newline :: Text
-newline = "\n"
+showT :: Show a => a -> Text
+showT = Text.pack . show
