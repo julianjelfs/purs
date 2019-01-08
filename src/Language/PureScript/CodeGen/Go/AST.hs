@@ -2,156 +2,225 @@
     https://golang.org/pkg/go/ast/
 -}
 module Language.PureScript.CodeGen.Go.AST
-    ( File(..)
-    , Package(..)
-    , Import(..)
-    , Decl(..)
+  ( File(..)
+  , Package
+  , unPackage
+  , Import(..)
+  , Decl(..)
+  , packageFromModuleName
 
-    -- * Expressions
-    , Expr(..)
-    , Literal(..)
-    , KeyValue
-    , Field
+  -- * Expressions
+  , Expr(..)
+  , Block(..)
+  , Literal(..)
+  , KeyValue
+  , Field
+  , getExprType
+  , getBlockType
+  , objectLiteral
+  , objectType
+  , typeAssert
 
-    -- * Types
-    , Type(..)
-    , BasicType(..)
+  -- * Types
+  , Type(..)
+  , BasicType(..)
 
-    -- * ???
-    , Func(..)
-    , Signature(..)
-    , Struct(..)
-
-    -- * Identifiers
-    , Ident
-    , unIdent
-    , publicIdent
-    , privateIdent
-    , localIdent
-    ) where
+  -- * Identifiers
+  , Ident(..)
+  , Visibility(..)
+  ) where
 
 import Prelude.Compat
 
+import qualified Language.PureScript.Names as PS
+import qualified Data.Text as Text
+
 import Data.Text (Text)
+import Data.Bifunctor (first)
 
 
 -- | A single Go source file.
 --
 data File = File
-    { filePackage  :: Package
-    , fileImports  :: [Import]
-    , fileDecls    :: [Decl]
-    }
+  { filePackage  :: Package
+  , fileImports  :: [Import]
+  , fileDecls    :: [Decl]
+  }
 
 
--- | Package name.
+newtype Package = Package { unPackage :: Text } deriving (Show, Eq)
+
+
+-- | Control.Monad -> package Control_Monad
 --
--- https://golang.org/pkg/go/ast/#Package
-newtype Package = Package { packageName :: Text }
+-- (can't have dots in package names)
+packageFromModuleName :: PS.ModuleName -> Package
+packageFromModuleName (PS.ModuleName pns) =
+  Package (Text.intercalate "_" (PS.runProperName <$> pns))
+  --                         ^
+  --            TODO: Camel case instead?
 
 
--- | Go package import.
---
--- https://golang.org/pkg/go/ast/#ImportSpec
 data Import = Import
-    -- import alias "path"
-    { importAlias :: Text
-    , importPath  :: Text
-    }
+  -- import package "path"
+  { importPackage :: Package
+  , importPath    :: Text
+  }
 
 
--- | Top-level declaration.
+-- | Go declaration.
 --
 data Decl
-    = FuncDecl Ident Func
-    | TypeDecl Ident Type
-    | TodoDecl Ident
-
-    -- TODO
-    -- | VarDecl  <- probably always want to use const!
-    -- | ConstDecl
-
-
--- | Go function abstraction.
-data Func = Func
-    { funcSignature :: Signature Field
-    , funcBody      :: Expr
-    }
-
-
--- | Go function signature
---
--- (the part after the "func" keyword and function binder)
-data Signature par = Signature
-    { signatureParams  :: [par]
-    , signatureResults :: [Type]
-    }
+  = FuncDecl Ident Field Type Block
+  | TypeDecl Ident Type
+  | VarDecl Ident Type Expr
+  | ConstDecl Ident Type Expr
 
 
 -- | Go type.
 --
 data Type
-    = BasicType BasicType
-    | StructType Struct
-    | FuncType (Signature Type)
-    | SliceType Type
-    | MapType Type Type
-    | EmptyInterfaceType -- ^ this gives us crude polymorphism
+  = BasicType BasicType
+  | StructType [Field]      -- ^ struct { foo int; bar string }
+  | FuncType Type Type      -- ^ func(int) int
+  | SliceType Type          -- ^ []item
+  | MapType Type Type       -- ^ map[key]value
+  | EmptyInterfaceType      -- ^ this gives us crude polymorphism
 
-    -- FIXME
-    | UnknownType String
+  -- XXX
+  | UnknownType String
+  deriving (Show, Eq)
 
 
--- | Go's fundamental primitives.
+-- | Go's fundamental types.
 --
 -- https://tour.golang.org/basics/11
 data BasicType
-    = BoolType       -- ^ bool
-    | StringType     -- ^ string
-    | IntType        -- ^ int
-    | Int8Type       -- ^ int8
-    | Int16Type      -- ^ int16
-    | Int32Type      -- ^ int32
-    | Int64Type      -- ^ int64
-    | UintType       -- ^ uint
-    | Uint8Type      -- ^ uint8
-    | Uint16Type     -- ^ uint16
-    | Uint32Type     -- ^ uint32
-    | Uint64Type     -- ^ uint64
-    | UintPtrType    -- ^ uintptr
-    | RuneType       -- ^ rune
-    | Float32Type    -- ^ float32
-    | Float64Type    -- ^ float64
-    | Complex64Type  -- ^ complex64
-    | Complex128Type -- ^ complex128
+  = BoolType       -- ^ bool
+  | StringType     -- ^ string
+  | IntType        -- ^ int
+  | Int8Type       -- ^ int8
+  | Int16Type      -- ^ int16
+  | Int32Type      -- ^ int32
+  | Int64Type      -- ^ int64
+  | UintType       -- ^ uint
+  | Uint8Type      -- ^ uint8
+  | Uint16Type     -- ^ uint16
+  | Uint32Type     -- ^ uint32
+  | Uint64Type     -- ^ uint64
+  | UintPtrType    -- ^ uintptr
+  | RuneType       -- ^ rune
+  | Float32Type    -- ^ float32
+  | Float64Type    -- ^ float64
+  | Complex64Type  -- ^ complex64
+  | Complex128Type -- ^ complex128
+  deriving (Show, Eq)
 
 
--- | Go's primitive product type.
---
--- struct {
---      foo int
---      bar string
---  }
-newtype Struct = Struct { structFields :: [Field] }
+data Block
+  = ReturnStmnt Expr
+  | AssignStmnt Ident Expr Block
+  deriving (Show)
+
+
+getBlockType :: Block -> Type
+getBlockType = \case
+  ReturnStmnt expr -> getExprType expr
+  AssignStmnt _ _ block -> getBlockType block
 
 
 -- | Go expression.
 --
+-- i.e. something that evaluates to a value
 data Expr
-    = LiteralExpr Literal
-    | FuncExpr Func
-    -- FIXME
-    | TodoExpr String
+  = LiteralExpr Literal
+  | AbsExpr Field Type Expr    -- ^ function abstraction: func(foo int) int { ... }
+  | VarExpr Type Ident         -- ^ foo
+  | AppExpr Type Expr Expr     -- ^ function application: foo(bar)
+  | TypeAssertExpr Type Expr   -- ^ foo.(int)
+
+  -- XXX
+  | TodoExpr String
+  deriving (Show)
 
 
 data Literal
-    = IntLiteral Integer
-    | FloatLiteral Double
-    | StringLiteral Text
-    | CharLiteral Char
-    | BoolLiteral Bool
-    | SliceLiteral Type [Expr]
-    | StructLiteral Struct [KeyValue Ident]
+  = IntLiteral Integer
+  | FloatLiteral Double
+  | StringLiteral Text
+  | CharLiteral Char
+  | BoolLiteral Bool
+  | SliceLiteral Type [Expr]
+  | MapLiteral Type Type [KeyValue Expr]
+  | StructLiteral [Field] [KeyValue Ident]
+  deriving (Show)
+
+
+getExprType :: Expr -> Type
+getExprType = \case
+  LiteralExpr literal        -> getLiteralType literal
+  AbsExpr param result _     -> FuncType (snd param) result
+  VarExpr varType _          -> varType
+  TypeAssertExpr assertion _ -> assertion
+
+  -- Return the _actual_ return type rather than
+  -- the type it's _supposed_ to return.
+  AppExpr _ (getExprType -> FuncType _ returnType) _ -> returnType
+
+  -- This next case should be impossible,
+  -- We should always have a function type on the left
+  -- side of an application
+  AppExpr{} -> undefined
+
+  -- XXX
+  TodoExpr _ -> EmptyInterfaceType
+
+
+getLiteralType :: Literal -> Type
+getLiteralType = \case
+  IntLiteral _                   -> BasicType IntType
+  FloatLiteral _                 -> BasicType Float64Type
+  StringLiteral _                -> BasicType StringType
+  CharLiteral _                  -> BasicType RuneType
+  BoolLiteral _                  -> BasicType BoolType
+  SliceLiteral itemType _        -> SliceType itemType
+  MapLiteral keyType valueType _ -> MapType keyType valueType
+  StructLiteral fields _         -> StructType fields
+
+
+typeAssert :: Expr -> Expr
+typeAssert expr = case expr of
+  LiteralExpr{}             -> expr
+  AbsExpr param result body -> AbsExpr param result (typeAssert body)
+  VarExpr{}                 -> expr
+  TypeAssertExpr{}          -> expr
+
+  -- NOTE: stopping at the outermost App rather than recursing
+  AppExpr want lhs rhs ->
+    case getExprType lhs of
+      FuncType _ EmptyInterfaceType
+        | want /= EmptyInterfaceType ->
+            TypeAssertExpr want (AppExpr want lhs (typeAssert rhs))
+      _ ->
+        AppExpr want lhs (typeAssert rhs)
+
+  -- XXX
+  TodoExpr{} -> expr
+
+
+-- | Go "object" (kinda)
+--
+-- map[string]interface{} is the closest thing we have to a js object in go.
+-- In fact, I'm faily sure that's how the std json package represents json
+-- objects.
+objectLiteral :: [KeyValue Text] -> Literal
+objectLiteral =
+  MapLiteral (BasicType StringType) EmptyInterfaceType .
+    fmap (first (LiteralExpr . StringLiteral))
+
+
+objectType :: Type
+objectType = MapType (BasicType StringType) EmptyInterfaceType
 
 
 -- | key: value
@@ -165,33 +234,19 @@ type Field = (Ident, Type)
 
 
 -- IDENTIFIERS
-
-
--- | Go identifier.
 --
-newtype Ident = Ident { unIdent :: Text }
-
-
 -- NOTE: Go exports identifiers that being with a Capital letter. There is no
--- explicit export list as in Haskell or Javascript. Hence identifiers have to
--- be constructed with some knowledge of visibility, which is why the following
--- three functions exist.
+-- explicit export list as in Haskell or Javascript.
 
 
--- | Expose an identifier.
---
-publicIdent :: Text -> Ident
-publicIdent ident = Ident ("Public_" <> ident)
+data Ident
+  = VisibleIdent Visibility Text -- ^ Top level binding, struct field
+  | ImportedIdent Package Text   -- ^ fmt.Sprintf
+  | LocalIdent Text              -- ^ foo
+  deriving (Show, Eq)
 
 
--- | Hide an identifier.
---
-privateIdent :: Text -> Ident
-privateIdent ident = Ident ("private_" <> ident)
-
-
--- | Create an identifier that doesn't care about it's package visibility.
---
--- For example: a binding in a function signature.
-localIdent :: Text -> Ident
-localIdent = Ident
+data Visibility
+  = Public    -- ^ Public
+  | Private   -- ^ private
+  deriving (Show, Eq)

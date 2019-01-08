@@ -7,7 +7,6 @@ import Prelude.Compat
 
 import qualified Data.Text as Text
 import qualified Language.PureScript.CodeGen.Go.AST as Go
-import           Language.PureScript.CodeGen.Go.Plumbing as Plumbing
 import qualified Language.PureScript.CoreFn as CoreFn
 import qualified Language.PureScript.Names as Names
 import qualified Language.PureScript.Constants as Constants
@@ -23,7 +22,7 @@ import Control.Monad.Reader (MonadReader)
 import Control.Monad.Supply.Class (MonadSupply)
 import Language.PureScript.Errors (MultipleErrors)
 import Language.PureScript.Options (Options)
-import Language.PureScript.PSString (PSString)
+import Language.PureScript.CodeGen.Go.Plumbing as Plumbing
 
 
 moduleToGo
@@ -39,30 +38,23 @@ moduleToGo
   -> m Go.File
 moduleToGo core importPrefix = pure Go.File {..}
   where
-    filePackage :: Go.Package
-    filePackage =
-      moduleNameToPackage (CoreFn.moduleName core)
+  filePackage :: Go.Package
+  filePackage =
+    Go.packageFromModuleName (CoreFn.moduleName core)
 
-    fileImports :: [Go.Import]
-    fileImports =
-      moduleNameToImport importPrefix . snd <$> moduleImports' core
+  fileImports :: [Go.Import]
+  fileImports =
+    moduleNameToImport importPrefix . snd <$> filteredModuleImports core
 
-    fileDecls :: [Go.Decl]
-    fileDecls =
-      concatMap (bindToGo $ CoreFn.moduleExports core) (CoreFn.moduleDecls core)
+  fileDecls :: [Go.Decl]
+  fileDecls =
+    bindToGo (mkContext core) `concatMap` flattenBinds (CoreFn.moduleDecls core)
 
 
 -- | CoreFn.moduleImports with filtering.
-moduleImports' :: CoreFn.Module CoreFn.Ann -> [(CoreFn.Ann, Names.ModuleName)]
-moduleImports' core = CoreFn.moduleImports core & filter
+filteredModuleImports :: CoreFn.Module CoreFn.Ann -> [(CoreFn.Ann, Names.ModuleName)]
+filteredModuleImports core = CoreFn.moduleImports core & filter
   (\(_, mn) -> mn /= CoreFn.moduleName core && mn `notElem` Constants.primModules)
-
-
--- | Control.Monad -> package Control_Monad
---
--- NOTE: can't have dots in package names.
-moduleNameToPackage :: Names.ModuleName -> Go.Package
-moduleNameToPackage mn = Go.Package (runProperName' "_" mn)
 
 
 -- | Control.Monad -> import Control_Monad "dir/Control.Monad"
@@ -70,166 +62,263 @@ moduleNameToPackage mn = Go.Package (runProperName' "_" mn)
 -- NOTE: can't have dots in import names.
 moduleNameToImport :: FilePath -> Names.ModuleName -> Go.Import
 moduleNameToImport dir mn =
-  Go.Import (runProperName' "_" mn) (addDir dir (Names.runModuleName mn))
+  Go.Import (Go.packageFromModuleName mn) (addDir dir (Names.runModuleName mn))
 
 
-bindToGo :: [Names.Ident] -> CoreFn.Bind CoreFn.Ann -> [Go.Decl]
-bindToGo exports (CoreFn.NonRec ann ident expr) =
-  nonRecToGo exports ann ident expr
-bindToGo exports (CoreFn.Rec rec) =
-  concatMap (uncurry . uncurry $ nonRecToGo exports) rec
+data Bind = Bind CoreFn.Ann Names.Ident (CoreFn.Expr CoreFn.Ann)
 
 
-nonRecToGo
-  :: [Names.Ident]
-  -> CoreFn.Ann
-  -> Names.Ident
-  -> CoreFn.Expr CoreFn.Ann
-  -> [Go.Decl]
-nonRecToGo exports _ ident expr =
-  case expr of
-    CoreFn.Abs (_, _, _, Just CoreFn.IsTypeClassConstructor) _ _ ->
-      let structName =
-            if ident `elem` exports
-            then Go.publicIdent (runIdent ident)
-            else Go.privateIdent (runIdent ident)
-
-          struct = Go.Struct (structFields $ unAbs expr)
-
-      in [ Go.TypeDecl structName (Go.StructType struct) ]
-
-    CoreFn.Abs ann arg body ->
-      let funcName =
-            if ident `elem` exports
-            then Go.publicIdent (runIdent ident)
-            else Go.privateIdent (runIdent ident)
-
-          func = absToFunc ann arg body
-
-       in [ Go.FuncDecl funcName func ]
-
-    _ ->
-      -- TODO
-      [ Go.TodoDecl (Go.privateIdent $ runIdent ident) ]
+flattenBinds :: [CoreFn.Bind CoreFn.Ann] -> [Bind]
+flattenBinds = concatMap flattenBind
 
 
-valueToGo :: CoreFn.Expr CoreFn.Ann -> Go.Expr
-valueToGo = \case
-  CoreFn.Literal ann literal -> Go.LiteralExpr (literalToGo ann literal)
-  CoreFn.Abs ann arg body    -> Go.FuncExpr (absToFunc ann arg body)
+flattenBind :: CoreFn.Bind CoreFn.Ann -> [Bind]
+flattenBind = \case
+  CoreFn.NonRec ann ident expr ->
+    [Bind ann ident expr]
 
-  -- FIXME
+  CoreFn.Rec rec ->
+    uncurry (uncurry Bind) <$> rec
+
+
+{- TODO: Proper error handling -}
+
+
+bindToGo :: Context -> Bind -> [Go.Decl]
+bindToGo context (Bind _ ident expr) = case expr of
+  CoreFn.Abs ann' arg body ->
+     case annType ann' of
+       Just (FunctionApp argType returnType) ->
+         [ Go.FuncDecl
+             (identToGo (moduleExports context) ident)
+             (localIdent arg, typeToGo context argType)
+             (typeToGo context returnType)
+             (Go.ReturnStmnt $ valueToGo context body)
+         ]
+       Just _  -> undefined
+       Nothing -> undefined
+
+  CoreFn.Constructor _ann _typeName ctorName [] ->
+    [ Go.TypeDecl
+        (properNameToGo (moduleExports context) ctorName)
+        (Go.StructType [])
+    ]
+
+  _ ->
+    case typeToGo context <$> annType (CoreFn.extractAnn expr) of
+      Just (Go.FuncType argType returnType) ->
+         let genIdent = Names.Ident "todo" in -- TODO
+         [ Go.FuncDecl
+             (identToGo (moduleExports context) ident)
+             (localIdent genIdent, argType)
+              returnType
+             (Go.ReturnStmnt . Go.typeAssert $ Go.AppExpr returnType
+                (valueToGo context expr)
+                (Go.VarExpr argType (localIdent genIdent))
+             )
+         ]
+
+      Just gotype ->
+        -- TODO: Use `const` where possible
+        [ Go.VarDecl
+            (identToGo (moduleExports context) ident)
+             gotype
+            (valueToGo context expr)
+        ]
+
+      Nothing -> error (show expr)
+
+
+valueToGo :: Context -> CoreFn.Expr CoreFn.Ann -> Go.Expr
+valueToGo context = Go.typeAssert . \case
+  CoreFn.Literal ann literal ->
+    Go.LiteralExpr (literalToGo context ann literal)
+
+  CoreFn.Abs ann arg body ->
+    case annType ann of
+      Just (FunctionApp argType returnType) ->
+        Go.AbsExpr
+          (localIdent arg, typeToGo context argType)
+          (typeToGo context returnType)
+          (valueToGo context body)
+      Just _  -> undefined
+      Nothing -> undefined
+
+  CoreFn.App ann lhs rhs ->
+    case typeToGo context <$> annType ann of
+      Just want ->
+        Go.AppExpr want (valueToGo context lhs) (valueToGo context rhs)
+
+      Nothing -> undefined
+
+  CoreFn.Var ann name ->
+    case ann of
+      -- TODO: Look at the CoreFn.Meta and case accordingly.
+
+      (_, _, Just t, _) ->
+        Go.VarExpr
+          (typeToGo context t)
+          (qualifiedIdentToGo context name)
+
+      _ -> undefined
+
+  -- CoreFn.Case ann exprs cases
+
+  CoreFn.Let _ann binds expr ->
+    mkAssignments context expr (flattenBinds binds)
+
+  -- XXX
   expr -> Go.TodoExpr (show expr)
 
 
-literalToGo :: CoreFn.Ann -> Literals.Literal (CoreFn.Expr CoreFn.Ann) -> Go.Literal
-literalToGo ann = \case
-  Literals.NumericLiteral (Left integer) -> Go.IntLiteral integer
-  Literals.NumericLiteral (Right double) -> Go.FloatLiteral double
-  Literals.StringLiteral psString        -> Go.StringLiteral (showT psString)
-  Literals.CharLiteral char              -> Go.CharLiteral char
-  Literals.BooleanLiteral bool           -> Go.BoolLiteral bool
+-- | TODO: This is hella inefficient.
+--
+mkAssignments :: Context -> CoreFn.Expr CoreFn.Ann -> [Bind] -> Go.Expr
+mkAssignments context expr = go
+  where
+  go [] = valueToGo context expr
+  go (Bind _ ident value : binds) =
+    let bind   = valueToGo context value
+        result = go binds
+    in
+    Go.AppExpr
+      (Go.getExprType result)
+      (Go.AbsExpr
+         (localIdent ident, Go.getExprType bind)
+         (Go.getExprType result)
+          result
+      )
+      bind
+
+
+literalToGo
+  :: Context
+  -> CoreFn.Ann
+  -> Literals.Literal (CoreFn.Expr CoreFn.Ann)
+  -> Go.Literal
+literalToGo context ann = \case
+  Literals.NumericLiteral (Left integer) ->
+    Go.IntLiteral integer
+
+  Literals.NumericLiteral (Right double) ->
+    Go.FloatLiteral double
+
+  Literals.StringLiteral psString ->
+    Go.StringLiteral (showT psString)
+
+  Literals.CharLiteral char ->
+    Go.CharLiteral char
+
+  Literals.BooleanLiteral bool ->
+    Go.BoolLiteral bool
 
   Literals.ArrayLiteral items ->
-    case typeToGo <$> annType ann of
+    case typeToGo context <$> annType ann of
       Just (Go.SliceType itemType) ->
-        Go.SliceLiteral itemType (valueToGo <$> items)
+        Go.SliceLiteral itemType (valueToGo context <$> items)
       Just _ ->
-        error ("CodeGen.Go.literalToGo: bad array type: " <> show (annType ann))
+        undefined
       Nothing ->
-        error "CodeGen.Go.literalToGo: missing array type"
+        undefined
 
   Literals.ObjectLiteral keyValues ->
-    Go.StructLiteral
-      (Go.Struct (bimap psStringToIdent exprType <$> keyValues))
-      (bimap psStringToIdent valueToGo <$> keyValues)
-    where
-      psStringToIdent :: PSString -> Go.Ident
-      psStringToIdent = Go.localIdent . narrowT 1 . showT
-      --                                ^^^^^^^^^
-      --                    Need to remove surrounding quotes
-
-      exprType :: CoreFn.Expr CoreFn.Ann -> Go.Type
-      exprType = maybeTypeToGo . annType . CoreFn.extractAnn
+    Go.objectLiteral (bimap showT (valueToGo context) <$> keyValues)
 
 
-structFields :: [(Names.Ident, Maybe Types.Type)] -> [(Go.Ident, Go.Type)]
-structFields [] = []
-structFields ((ident, ty): rest) =
-  (Go.privateIdent (runIdent ident), maybeTypeToGo ty) : structFields rest
+typeToGo :: Context -> Types.Type -> Go.Type
+typeToGo context = \case
+  FunctionApp x y ->
+    Go.FuncType (typeToGo context x) (typeToGo context y)
+
+  Types.ForAll _ t _ ->
+    typeToGo context t
+
+  Prim "Boolean" ->
+    Go.BasicType Go.BoolType
+
+  Prim "Int" ->
+    Go.BasicType Go.IntType
+
+  Prim "Number" ->
+    Go.BasicType Go.Float64Type
+
+  Prim "String" ->
+    Go.BasicType Go.StringType
+
+  Prim "Char" ->
+    Go.BasicType Go.RuneType -- ???
+
+  Types.TypeVar _ ->
+    Go.EmptyInterfaceType
+
+  Types.Skolem _ _ _ _->
+    Go.EmptyInterfaceType
+
+  Types.TypeApp (Prim "Array") itemType ->
+    Go.SliceType (typeToGo context itemType)
+
+  Types.TypeApp (Prim "Record") _ ->
+    Go.objectType
+
+  --Types.TypeConstructor typeName ->
+
+  -- XXX
+  ty -> Go.UnknownType (show ty)
 
 
-maybeTypeToGo :: Maybe Types.Type -> Go.Type
-maybeTypeToGo = maybe Go.EmptyInterfaceType typeToGo
+qualifiedIdentToGo
+  :: Context
+  -> Names.Qualified Names.Ident
+  -> Go.Ident
+qualifiedIdentToGo Context {..} = \case
+  Names.Qualified Nothing ident ->
+    localIdent ident
+  Names.Qualified (Just moduleName) ident
+    | moduleName /= currentModule -> importedIdent moduleName ident
+    | otherwise -> identToGo moduleExports ident
 
 
-typeToGo :: Types.Type -> Go.Type
-typeToGo (x :-> y) = Go.FuncType (Go.Signature [typeToGo x] [typeToGo y])
-
--- Primitive types
-typeToGo (PrimType "Boolean") = Go.BasicType Go.BoolType
-typeToGo (PrimType "Int")     = Go.BasicType Go.IntType
-typeToGo (PrimType "Number")  = Go.BasicType Go.Float64Type
-typeToGo (PrimType "String")  = Go.BasicType Go.StringType
-typeToGo (PrimType "Char")    = Go.BasicType Go.RuneType -- ???
-
-typeToGo (Types.TypeApp (PrimType "Array") itemType) = Go.SliceType (typeToGo itemType)
-
--- FIXME
-typeToGo ty = Go.UnknownType (show ty)
+identToGo :: [Names.Ident] -> Names.Ident -> Go.Ident
+identToGo exports ident
+  | ident `elem` exports = publicIdent ident
+  | otherwise = privateIdent ident
 
 
-pattern PrimType :: Text -> Types.Type
-pattern PrimType t <-
-  Types.TypeConstructor (Names.Qualified (Just (Names.ModuleName [Names.ProperName "Prim"])) (Names.ProperName t))
-
-
--- | Infix pattern synonym to make matching function types nicer.
-pattern (:->) :: Types.Type -> Types.Type -> Types.Type
-pattern lhs :-> rhs <-
-  Types.TypeApp (Types.TypeApp (PrimType "Function") lhs) rhs
-
-
-absToFunc :: CoreFn.Ann -> Names.Ident -> (CoreFn.Expr CoreFn.Ann) -> Go.Func
-absToFunc ann ident expr = case annType ann of
-  Just (argType :-> returnType) -> Go.Func
-    { funcSignature = curriedSignature (ident, argType) returnType
-    , funcBody      = valueToGo expr
-    }
-  Just bad -> error ("CodeGen.Go.absToFunc: bad abs type: " <> show bad)
-  Nothing  -> error "CodeGen.Go.absToFunc: untyped function"
-
-
-curriedSignature :: (Names.Ident, Types.Type) -> Types.Type -> Go.Signature (Go.Ident, Go.Type)
-curriedSignature (argName, argType) returnType = Go.Signature
-  { signatureParams  = [ (Go.localIdent (runIdent argName), typeToGo argType) ]
-  , signatureResults = [ typeToGo returnType ]
-  }
-
-
-unAbs :: CoreFn.Expr CoreFn.Ann -> [(Names.Ident, Maybe Types.Type)]
-unAbs (CoreFn.Abs ann arg val) = (arg, annType ann) : unAbs val
-unAbs _ = []
+properNameToGo :: [Names.Ident] -> Names.ProperName n -> Go.Ident
+properNameToGo exports typeName =
+  identToGo exports $ Names.Ident (Names.runProperName typeName)
 
 
 annType :: CoreFn.Ann -> Maybe Types.Type
 annType (_, _, mbType, _) = mbType
 
 
-runIdent :: Names.Ident -> Text
-runIdent (Names.Ident ident) = ident
-runIdent (Names.GenIdent Nothing n) = "gen__" <> Text.pack (show n)
-runIdent (Names.GenIdent (Just name) n) = "gen__" <> name <> Text.pack (show n)
-runIdent Names.UnusedIdent = "unused"
+publicIdent :: Names.Ident -> Go.Ident
+publicIdent = Go.VisibleIdent Go.Public . unIdent
 
 
--- | Join proper names with the given separator.
-runProperName' :: Text -> Names.ModuleName -> Text
-runProperName' sep (Names.ModuleName pns) =
-  Text.intercalate sep (Names.runProperName <$> pns)
+privateIdent :: Names.Ident -> Go.Ident
+privateIdent = Go.VisibleIdent Go.Private . unIdent
+
+
+importedIdent :: Names.ModuleName -> Names.Ident -> Go.Ident
+importedIdent mn ident =
+  Go.ImportedIdent (Go.packageFromModuleName mn) (unIdent ident)
+
+
+localIdent :: Names.Ident -> Go.Ident
+localIdent = Go.LocalIdent . unIdent
+
+
+unIdent :: Names.Ident -> Text
+unIdent (Names.Ident ident)            = ident
+unIdent (Names.GenIdent Nothing n)     = "gen__" <> Text.pack (show n)
+unIdent (Names.GenIdent (Just name) n) = "gen__" <> name <> Text.pack (show n)
+unIdent Names.UnusedIdent              = "unused"
 
 
 -- | Add a directory name to a file path.
+--
 addDir :: FilePath -> Text -> Text
 addDir dir base = Text.pack (dir </> Text.unpack base)
 
@@ -238,5 +327,31 @@ showT :: Show a => a -> Text
 showT = Text.pack . show
 
 
-narrowT :: Int -> Text -> Text
-narrowT i = Text.dropEnd i . Text.drop i
+data Context = Context
+    { currentModule :: Names.ModuleName
+    , moduleExports :: [Names.Ident]
+    }
+
+
+mkContext :: CoreFn.Module CoreFn.Ann -> Context
+mkContext = Context <$> CoreFn.moduleName <*> CoreFn.moduleExports
+
+
+-- PATTERN SYNONYMS
+
+
+pattern Prim :: Text -> Types.Type
+pattern Prim t <-
+  Types.TypeConstructor (Names.Qualified (Just (Names.ModuleName [Names.ProperName "Prim"])) (Names.ProperName t))
+
+
+pattern FunctionApp :: Types.Type -> Types.Type -> Types.Type
+pattern FunctionApp lhs rhs <-
+  Types.TypeApp (Types.TypeApp (Prim "Function") lhs) rhs
+
+
+-- RECYCLING
+
+
+_narrowT :: Int -> Text -> Text
+_narrowT i = Text.dropEnd i . Text.drop i
