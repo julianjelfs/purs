@@ -30,6 +30,7 @@ module Language.PureScript.CodeGen.Go.AST
   -- * Identifiers
   , Ident(..)
   , Visibility(..)
+  , mapIdent
   ) where
 
 import Prelude.Compat
@@ -89,6 +90,7 @@ data Type
   | MapType Type Type       -- ^ map[key]value
   | EmptyInterfaceType      -- ^ this gives us crude polymorphism
   | NamedType Ident
+  | PointerType Type
 
   -- XXX
   | UnknownType String
@@ -141,6 +143,8 @@ data Expr
   | VarExpr Type Ident         -- ^ foo
   | AppExpr Type Expr Expr     -- ^ function application: foo(bar)
   | TypeAssertExpr Type Expr   -- ^ foo.(int)
+  | ReferenceExpr Expr         -- ^ &foo
+  | DereferenceExpr Expr       -- ^ *foo
 
   -- XXX
   | TodoExpr String
@@ -156,6 +160,7 @@ data Literal
   | SliceLiteral Type [Expr]
   | MapLiteral Type Type [KeyValue Expr]
   | StructLiteral [Field] [KeyValue Ident]
+  | NamedStructLiteral Ident [KeyValue Ident]
   deriving (Show)
 
 
@@ -173,6 +178,8 @@ getExprType = \case
   AbsExpr param result _     -> FuncType (snd param) result
   VarExpr varType _          -> varType
   TypeAssertExpr assertion _ -> assertion
+  ReferenceExpr expr         -> PointerType (getExprType expr)
+  DereferenceExpr expr       -> getExprType expr
 
   -- Return the _actual_ return type rather than
   -- the type it's _supposed_ to return.
@@ -197,6 +204,7 @@ getLiteralType = \case
   SliceLiteral itemType _        -> SliceType itemType
   MapLiteral keyType valueType _ -> MapType keyType valueType
   StructLiteral fields _         -> StructType fields
+  NamedStructLiteral ident _     -> NamedType ident
 
 
 typeAssert :: Expr -> Expr
@@ -205,6 +213,8 @@ typeAssert expr = case expr of
   AbsExpr param result body -> AbsExpr param result (typeAssert body)
   VarExpr{}                 -> expr
   TypeAssertExpr{}          -> expr
+  ReferenceExpr{}           -> expr
+  DereferenceExpr{}         -> expr
 
   -- NOTE: stopping at the outermost App rather than recursing
   AppExpr want lhs rhs ->
@@ -261,3 +271,10 @@ data Visibility
   = Public    -- ^ Public
   | Private   -- ^ private
   deriving (Show, Eq)
+
+
+mapIdent :: (Text -> Text) -> Ident -> Ident
+mapIdent f = \case
+  VisibleIdent visibility text -> VisibleIdent visibility (f text)
+  ImportedIdent package text   -> ImportedIdent package (f text)
+  LocalIdent text              -> LocalIdent (f text)

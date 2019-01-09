@@ -10,7 +10,6 @@ import Prelude.Compat
 
 import qualified Language.PureScript.CodeGen.Go.AST as Go
 import qualified Data.Text as Text
-import qualified Data.Char as Char
 
 import Data.Text (Text)
 import Data.Monoid (Endo(..))
@@ -92,6 +91,12 @@ printGoExpr = \case
   Go.TypeAssertExpr assertion expr ->
     printGoExpr expr <> ".(" <> printGoType assertion <> ")"
 
+  Go.ReferenceExpr expr ->
+    "&" <> printGoExpr expr
+
+  Go.DereferenceExpr expr ->
+    "*" <> printGoExpr expr
+
   -- XXX
   Go.TodoExpr what ->
     "/* TODO: " <> showT what <> "*/"
@@ -135,6 +140,13 @@ printGoLiteral = \case
       , "}"
       ]
 
+  Go.NamedStructLiteral ident keyvalues ->
+    Text.concat
+      [ printGoIdent ident, "{"
+      , Text.intercalate "," (printGoKeyValue printGoIdent <$> keyvalues)
+      , "}"
+      ]
+
 
 printGoType :: Go.Type -> Text
 printGoType = \case
@@ -158,6 +170,9 @@ printGoType = \case
 
   Go.NamedType name ->
     printGoIdent name
+
+  Go.PointerType gotype ->
+    "*" <> printGoType gotype
 
   -- XXX
   Go.UnknownType what ->
@@ -215,34 +230,23 @@ printGoIdent = sanitise . \case
   Go.LocalIdent ident ->
     ident
   where
-  -- NOTE: I'm not sure how we should handle exposing/hiding identifiers yet.
-  -- The most robust solution would be to add a prefix (see commented code below)
-  -- but that makes the generated code look gross. It would be nice to have a
-  -- more human solution
   mkPublic :: Text -> Text
-  --mkPublic = ("Public__" <>)
-  mkPublic = mapFirstChar Char.toUpper
+  mkPublic = ("Public_" <>)
 
   mkPrivate :: Text -> Text
-  --mkPrivate = ("private__" <>)
-  mkPrivate = mapFirstChar Char.toLower
+  mkPrivate = ("private_" <>)
 
   sanitise :: Text -> Text
   sanitise = appEndo $ foldMap Endo
-    [ \x -> if x `elem` keywords then Text.snoc x '_' else x
-    , Text.replace "'" "_"
-    ]
-    where
-    keywords :: [Text]
-    keywords = ["const"]
-
-
-mapFirstChar :: (Char -> Char) -> Text -> Text
-mapFirstChar f t =
-  case Text.uncons t of
-    Just (c, rest) -> Text.cons (f c) rest
-    Nothing -> ""
+    [ Text.replace "'" "_" ]
 
 
 showT :: Show a => a -> Text
 showT = Text.pack . show
+
+
+_mapFirstChar :: (Char -> Char) -> Text -> Text
+_mapFirstChar f t =
+  case Text.uncons t of
+    Just (c, rest) -> Text.cons (f c) rest
+    Nothing -> ""

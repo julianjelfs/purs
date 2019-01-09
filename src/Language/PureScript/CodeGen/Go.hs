@@ -104,36 +104,31 @@ bindToGo context (Bind _ ident expr) = case expr of
        Just _  -> undefined
        Nothing -> undefined
 
-  -- NOTE: Probably want something like this for...
+  -- TODO: Trying to recreate
+  -- https://gist.github.com/jmackie/34fbe817752dc788f194f07b555b50b8
   --
-  -- type Foo struct {
-  -- 	_A *struct{}  // pointers so that uninitialized fields are nil
+  -- Which will require an extra step to extract type from decls
   --
-  -- 	_B *struct {
-  -- 		value0 interface{}
-  -- 	}
-  --
-  -- 	_C *struct {
-  -- 		value0 interface{}
-  -- 		value1 interface{}
-  -- 	}
-  -- }
-  --
-  -- func A() Foo {
-  -- 	return Foo{_A: &struct{}{}}
-  -- }
-
-  CoreFn.Constructor _ann _typeName ctorName [] ->
-    [ Go.ConstDecl
-        (identToGo (moduleExports context) (runConstructorName ctorName))
-        Go.emptyStructType
-        Go.emptyStructLiteral
+  CoreFn.Constructor _ann typeName ctorName [] ->
+    let ctorIdent = identToGo (moduleExports context) (unConstructorName ctorName)
+        typeIdent = identToGo (moduleExports context) (unTypeName typeName)
+    in
+    [ Go.VarDecl
+        ctorIdent
+        (Go.NamedType typeIdent)
+        (Go.LiteralExpr $ Go.NamedStructLiteral
+          typeIdent
+          [(Go.mapIdent ("_"<>) ctorIdent, Go.ReferenceExpr Go.emptyStructLiteral)]
+        )
     ]
 
-  CoreFn.Constructor _ann _typeName ctorName _ctors ->
+  -- TODO: should be an Abs
+  CoreFn.Constructor _ann _typeName ctorName ctors ->
     [ Go.TypeDecl
-        (identToGo (moduleExports context) (runConstructorName ctorName))
-        Go.emptyStructType
+        (identToGo (moduleExports context) (unConstructorName ctorName))
+        (Go.StructType $
+           fmap (\ctor -> (localIdent ctor, Go.EmptyInterfaceType)) ctors
+        )
     ]
 
   _ ->
@@ -281,7 +276,7 @@ typeToGo context = \case
     Go.objectType
 
   (unTypeApp -> Types.TypeConstructor typeName : _) ->
-    Go.NamedType (qualifiedIdentToGo context (runTypeName <$> typeName))
+    Go.NamedType (qualifiedIdentToGo context (unTypeName <$> typeName))
 
   -- XXX
   ty -> Go.UnknownType (show ty)
@@ -305,12 +300,13 @@ qualifiedIdentToGo Context {..} = \case
     | otherwise -> identToGo moduleExports ident
 
 
-runTypeName :: Names.ProperName 'Names.TypeName -> Names.Ident
-runTypeName typeName = Names.Ident (Names.runProperName typeName <> "Type")
+-- | NOTE: We need to append "Type" here because there is only one namespace.
+unTypeName :: Names.ProperName 'Names.TypeName -> Names.Ident
+unTypeName typeName = Names.Ident (Names.runProperName typeName <> "Type")
 
 
-runConstructorName :: Names.ProperName 'Names.ConstructorName -> Names.Ident
-runConstructorName typeName = Names.Ident (Names.runProperName typeName)
+unConstructorName :: Names.ProperName 'Names.ConstructorName -> Names.Ident
+unConstructorName typeName = Names.Ident (Names.runProperName typeName)
 
 
 annType :: CoreFn.Ann -> Maybe Types.Type
@@ -359,7 +355,7 @@ data Context = Context
 
 mkContext :: CoreFn.Module CoreFn.Ann -> Context
 mkContext CoreFn.Module {..} =
-  Context moduleName (moduleExports <> fmap runTypeName exportedTypeNames)
+  Context moduleName (moduleExports <> fmap unTypeName exportedTypeNames)
   where
   exportedTypeNames :: [Names.ProperName 'Names.TypeName]
   exportedTypeNames = mapMaybe getExportedTypeName (flattenBinds moduleDecls)
