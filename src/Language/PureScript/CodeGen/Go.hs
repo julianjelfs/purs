@@ -4,6 +4,7 @@ module Language.PureScript.CodeGen.Go
   ) where
 
 import Prelude.Compat
+--import Debug.Trace (traceShowId)
 
 import qualified Data.Text as Text
 import qualified Language.PureScript.CodeGen.Go.AST as Go
@@ -17,6 +18,7 @@ import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.Text (Text)
 import Data.Function ((&))
+import Data.Maybe (mapMaybe)
 import Data.Bifunctor (bimap)
 import Control.Monad.Reader (MonadReader)
 import Control.Monad.Supply.Class (MonadSupply)
@@ -65,7 +67,11 @@ moduleNameToImport dir mn =
   Go.Import (Go.packageFromModuleName mn) (addDir dir (Names.runModuleName mn))
 
 
-data Bind = Bind CoreFn.Ann Names.Ident (CoreFn.Expr CoreFn.Ann)
+data Bind = Bind
+  { _bindAnn   :: CoreFn.Ann
+  , _bindIdent :: Names.Ident
+  , _bindExpr  :: CoreFn.Expr CoreFn.Ann
+  }
 
 
 flattenBinds :: [CoreFn.Bind CoreFn.Ann] -> [Bind]
@@ -98,26 +104,40 @@ bindToGo context (Bind _ ident expr) = case expr of
        Just _  -> undefined
        Nothing -> undefined
 
+  -- NOTE: Probably want something like this for...
+  --
+  -- type Foo struct {
+  -- 	_A *struct{}  // pointers so that uninitialized fields are nil
+  --
+  -- 	_B *struct {
+  -- 		value0 interface{}
+  -- 	}
+  --
+  -- 	_C *struct {
+  -- 		value0 interface{}
+  -- 		value1 interface{}
+  -- 	}
+  -- }
+  --
+  -- func A() Foo {
+  -- 	return Foo{_A: &struct{}{}}
+  -- }
+
   CoreFn.Constructor _ann _typeName ctorName [] ->
+    [ Go.ConstDecl
+        (identToGo (moduleExports context) (runConstructorName ctorName))
+        Go.emptyStructType
+        Go.emptyStructLiteral
+    ]
+
+  CoreFn.Constructor _ann _typeName ctorName _ctors ->
     [ Go.TypeDecl
-        (properNameToGo (moduleExports context) ctorName)
-        (Go.StructType [])
+        (identToGo (moduleExports context) (runConstructorName ctorName))
+        Go.emptyStructType
     ]
 
   _ ->
     case typeToGo context <$> annType (CoreFn.extractAnn expr) of
-      Just (Go.FuncType argType returnType) ->
-         let genIdent = Names.Ident "todo" in -- TODO
-         [ Go.FuncDecl
-             (identToGo (moduleExports context) ident)
-             (localIdent genIdent, argType)
-              returnType
-             (Go.ReturnStmnt . Go.typeAssert $ Go.AppExpr returnType
-                (valueToGo context expr)
-                (Go.VarExpr argType (localIdent genIdent))
-             )
-         ]
-
       Just gotype ->
         -- TODO: Use `const` where possible
         [ Go.VarDecl
@@ -171,7 +191,7 @@ valueToGo context = Go.typeAssert . \case
   expr -> Go.TodoExpr (show expr)
 
 
--- | TODO: This is hella inefficient.
+-- | TODO: Optimise this away.
 --
 mkAssignments :: Context -> CoreFn.Expr CoreFn.Ann -> [Bind] -> Go.Expr
 mkAssignments context expr = go
@@ -248,10 +268,10 @@ typeToGo context = \case
   Prim "Char" ->
     Go.BasicType Go.RuneType -- ???
 
-  Types.TypeVar _ ->
+  Types.TypeVar{} ->
     Go.EmptyInterfaceType
 
-  Types.Skolem _ _ _ _->
+  Types.Skolem{} ->
     Go.EmptyInterfaceType
 
   Types.TypeApp (Prim "Array") itemType ->
@@ -260,10 +280,17 @@ typeToGo context = \case
   Types.TypeApp (Prim "Record") _ ->
     Go.objectType
 
-  --Types.TypeConstructor typeName ->
+  (unTypeApp -> Types.TypeConstructor typeName : _) ->
+    Go.NamedType (qualifiedIdentToGo context (runTypeName <$> typeName))
 
   -- XXX
   ty -> Go.UnknownType (show ty)
+
+
+identToGo :: [Names.Ident] -> Names.Ident -> Go.Ident
+identToGo exports ident
+  | ident `elem` exports = publicIdent ident
+  | otherwise = privateIdent ident
 
 
 qualifiedIdentToGo
@@ -278,15 +305,12 @@ qualifiedIdentToGo Context {..} = \case
     | otherwise -> identToGo moduleExports ident
 
 
-identToGo :: [Names.Ident] -> Names.Ident -> Go.Ident
-identToGo exports ident
-  | ident `elem` exports = publicIdent ident
-  | otherwise = privateIdent ident
+runTypeName :: Names.ProperName 'Names.TypeName -> Names.Ident
+runTypeName typeName = Names.Ident (Names.runProperName typeName <> "Type")
 
 
-properNameToGo :: [Names.Ident] -> Names.ProperName n -> Go.Ident
-properNameToGo exports typeName =
-  identToGo exports $ Names.Ident (Names.runProperName typeName)
+runConstructorName :: Names.ProperName 'Names.ConstructorName -> Names.Ident
+runConstructorName typeName = Names.Ident (Names.runProperName typeName)
 
 
 annType :: CoreFn.Ann -> Maybe Types.Type
@@ -334,7 +358,22 @@ data Context = Context
 
 
 mkContext :: CoreFn.Module CoreFn.Ann -> Context
-mkContext = Context <$> CoreFn.moduleName <*> CoreFn.moduleExports
+mkContext CoreFn.Module {..} =
+  Context moduleName (moduleExports <> fmap runTypeName exportedTypeNames)
+  where
+  exportedTypeNames :: [Names.ProperName 'Names.TypeName]
+  exportedTypeNames = mapMaybe getExportedTypeName (flattenBinds moduleDecls)
+
+  getExportedTypeName :: Bind -> Maybe (Names.ProperName 'Names.TypeName)
+  getExportedTypeName (Bind _ ident expr) = case expr of
+    CoreFn.Constructor _ typeName _ _
+      | ident `elem` moduleExports -> Just typeName
+    _ -> Nothing
+
+
+unTypeApp :: Types.Type -> [Types.Type]
+unTypeApp (Types.TypeApp a b) = unTypeApp a <> unTypeApp b
+unTypeApp t = [t]
 
 
 -- PATTERN SYNONYMS

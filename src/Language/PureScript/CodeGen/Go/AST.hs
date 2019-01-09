@@ -17,9 +17,11 @@ module Language.PureScript.CodeGen.Go.AST
   , Field
   , getExprType
   , getBlockType
+  , typeAssert
   , objectLiteral
   , objectType
-  , typeAssert
+  , emptyStructLiteral
+  , emptyStructType
 
   -- * Types
   , Type(..)
@@ -86,6 +88,7 @@ data Type
   | SliceType Type          -- ^ []item
   | MapType Type Type       -- ^ map[key]value
   | EmptyInterfaceType      -- ^ this gives us crude polymorphism
+  | NamedType Ident
 
   -- XXX
   | UnknownType String
@@ -154,6 +157,14 @@ data Literal
   | MapLiteral Type Type [KeyValue Expr]
   | StructLiteral [Field] [KeyValue Ident]
   deriving (Show)
+
+
+emptyStructLiteral :: Expr
+emptyStructLiteral = LiteralExpr (StructLiteral [] [])
+
+
+emptyStructType :: Type
+emptyStructType = StructType []
 
 
 getExprType :: Expr -> Type

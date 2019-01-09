@@ -156,6 +156,9 @@ printGoType = \case
   Go.EmptyInterfaceType ->
     "interface{}"
 
+  Go.NamedType name ->
+    printGoIdent name
+
   -- XXX
   Go.UnknownType what ->
     "interface{} /* " <> Text.pack what <> "*/"
