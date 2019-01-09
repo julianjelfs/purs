@@ -16,6 +16,7 @@ import qualified Language.PureScript.AST.Literals as Literals
 
 import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
+import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
 import Data.Function ((&))
 import Data.Maybe (mapMaybe)
@@ -110,26 +111,21 @@ bindToGo context (Bind _ ident expr) = case expr of
   -- Which will require an extra step to extract type from decls
   --
   CoreFn.Constructor _ann typeName ctorName [] ->
-    let ctorIdent = identToGo (moduleExports context) (unConstructorName ctorName)
-        typeIdent = identToGo (moduleExports context) (unTypeName typeName)
-    in
+    let typeIdent = typeNameIdent context typeName in
     [ Go.VarDecl
-        ctorIdent
+        (constructorNameIdent context ctorName)
         (Go.NamedType typeIdent)
         (Go.LiteralExpr $ Go.NamedStructLiteral
           typeIdent
-          [(Go.mapIdent ("_"<>) ctorIdent, Go.ReferenceExpr Go.emptyStructLiteral)]
+          [ ( constructorNameProperty ctorName
+            , Go.ReferenceExpr Go.emptyStructLiteral
+            )
+          ]
         )
     ]
 
-  -- TODO: should be an Abs
-  CoreFn.Constructor _ann _typeName ctorName ctors ->
-    [ Go.TypeDecl
-        (identToGo (moduleExports context) (unConstructorName ctorName))
-        (Go.StructType $
-           fmap (\ctor -> (localIdent ctor, Go.EmptyInterfaceType)) ctors
-        )
-    ]
+  CoreFn.Constructor _ann typeName ctorName (ctor : ctors ) ->
+    [ constructorFunc context typeName ctorName (ctor :| ctors) ]
 
   _ ->
     case typeToGo context <$> annType (CoreFn.extractAnn expr) of
@@ -142,6 +138,43 @@ bindToGo context (Bind _ ident expr) = case expr of
         ]
 
       Nothing -> error (show expr)
+
+
+constructorFunc
+  :: Context
+  -> Names.ProperName 'Names.TypeName
+  -> Names.ProperName 'Names.ConstructorName
+  -> NonEmpty Names.Ident
+  -> Go.Decl
+constructorFunc context typeName ctorName (ctor :| ctors) =
+  Go.FuncDecl
+    (identToGo (moduleExports context) (unConstructorName ctorName))
+    (localIdent ctor, Go.EmptyInterfaceType)
+    `uncurry`
+    (Go.ReturnStmnt <$> go ctors)
+  where
+  go :: [Names.Ident] -> (Go.Type, Go.Expr)
+  go [] =
+    ( Go.NamedType (typeNameIdent context typeName)
+    , Go.LiteralExpr $ Go.NamedStructLiteral
+        (typeNameIdent context typeName)
+        [ ( constructorNameProperty ctorName
+          , Go.ReferenceExpr . Go.LiteralExpr $
+              Go.StructLiteral
+                (fmap (\ctor' ->
+                   (localIdent ctor', Go.EmptyInterfaceType))
+                   (ctor : ctors))
+                (fmap (\ctor' ->
+                   (localIdent ctor', Go.VarExpr Go.EmptyInterfaceType (localIdent ctor)))
+                   (ctor : ctors))
+          )
+        ]
+    )
+  go (ctor' : rest) =
+    let (gotype, expr) = go rest in
+    ( Go.FuncType Go.EmptyInterfaceType gotype
+    , Go.AbsExpr (localIdent ctor', Go.EmptyInterfaceType) gotype expr
+    )
 
 
 valueToGo :: Context -> CoreFn.Expr CoreFn.Ann -> Go.Expr
@@ -282,6 +315,29 @@ typeToGo context = \case
   ty -> Go.UnknownType (show ty)
 
 
+data Context = Context
+    { currentModule :: Names.ModuleName
+    , moduleExports :: [Names.Ident]
+    }
+
+
+mkContext :: CoreFn.Module CoreFn.Ann -> Context
+mkContext CoreFn.Module {..} =
+  Context moduleName (moduleExports <> fmap unTypeName exportedTypeNames)
+  where
+  exportedTypeNames :: [Names.ProperName 'Names.TypeName]
+  exportedTypeNames = mapMaybe getExportedTypeName (flattenBinds moduleDecls)
+
+  getExportedTypeName :: Bind -> Maybe (Names.ProperName 'Names.TypeName)
+  getExportedTypeName (Bind _ ident expr) = case expr of
+    CoreFn.Constructor _ typeName _ _
+      | ident `elem` moduleExports -> Just typeName
+    _ -> Nothing
+
+
+-- IDENTIFIERS
+
+
 identToGo :: [Names.Ident] -> Names.Ident -> Go.Ident
 identToGo exports ident
   | ident `elem` exports = publicIdent ident
@@ -305,12 +361,20 @@ unTypeName :: Names.ProperName 'Names.TypeName -> Names.Ident
 unTypeName typeName = Names.Ident (Names.runProperName typeName <> "Type")
 
 
+typeNameIdent :: Context -> Names.ProperName 'Names.TypeName -> Go.Ident
+typeNameIdent context= identToGo (moduleExports context) . unTypeName
+
+
 unConstructorName :: Names.ProperName 'Names.ConstructorName -> Names.Ident
 unConstructorName typeName = Names.Ident (Names.runProperName typeName)
 
 
-annType :: CoreFn.Ann -> Maybe Types.Type
-annType (_, _, mbType, _) = mbType
+constructorNameIdent :: Context -> Names.ProperName 'Names.ConstructorName -> Go.Ident
+constructorNameIdent context = identToGo (moduleExports context) . unConstructorName
+
+
+constructorNameProperty :: Names.ProperName 'Names.ConstructorName -> Go.Ident
+constructorNameProperty = Go.mapIdent ("_"<>) . localIdent . unConstructorName
 
 
 publicIdent :: Names.Ident -> Go.Ident
@@ -322,8 +386,7 @@ privateIdent = Go.VisibleIdent Go.Private . unIdent
 
 
 importedIdent :: Names.ModuleName -> Names.Ident -> Go.Ident
-importedIdent mn ident =
-  Go.ImportedIdent (Go.packageFromModuleName mn) (unIdent ident)
+importedIdent mn ident = Go.ImportedIdent (Go.packageFromModuleName mn) (unIdent ident)
 
 
 localIdent :: Names.Ident -> Go.Ident
@@ -337,6 +400,18 @@ unIdent (Names.GenIdent (Just name) n) = "gen__" <> name <> Text.pack (show n)
 unIdent Names.UnusedIdent              = "unused"
 
 
+-- UTIL
+
+
+annType :: CoreFn.Ann -> Maybe Types.Type
+annType (_, _, mbType, _) = mbType
+
+
+unTypeApp :: Types.Type -> [Types.Type]
+unTypeApp (Types.TypeApp a b) = unTypeApp a <> unTypeApp b
+unTypeApp t = [t]
+
+
 -- | Add a directory name to a file path.
 --
 addDir :: FilePath -> Text -> Text
@@ -345,31 +420,6 @@ addDir dir base = Text.pack (dir </> Text.unpack base)
 
 showT :: Show a => a -> Text
 showT = Text.pack . show
-
-
-data Context = Context
-    { currentModule :: Names.ModuleName
-    , moduleExports :: [Names.Ident]
-    }
-
-
-mkContext :: CoreFn.Module CoreFn.Ann -> Context
-mkContext CoreFn.Module {..} =
-  Context moduleName (moduleExports <> fmap unTypeName exportedTypeNames)
-  where
-  exportedTypeNames :: [Names.ProperName 'Names.TypeName]
-  exportedTypeNames = mapMaybe getExportedTypeName (flattenBinds moduleDecls)
-
-  getExportedTypeName :: Bind -> Maybe (Names.ProperName 'Names.TypeName)
-  getExportedTypeName (Bind _ ident expr) = case expr of
-    CoreFn.Constructor _ typeName _ _
-      | ident `elem` moduleExports -> Just typeName
-    _ -> Nothing
-
-
-unTypeApp :: Types.Type -> [Types.Type]
-unTypeApp (Types.TypeApp a b) = unTypeApp a <> unTypeApp b
-unTypeApp t = [t]
 
 
 -- PATTERN SYNONYMS
