@@ -69,6 +69,9 @@ printGoBlock = \case
   Go.AssignStmnt ident expr block ->
     printGoIdent ident <> " := " <> printGoExpr expr <> "; " <> printGoBlock block
 
+  Go.IfElseStmnt cond yes no ->
+    "if " <> printGoExpr cond <> " {\n" <> printGoBlock yes <> "}\n" <> printGoBlock no
+
 
 printGoExpr :: Go.Expr -> Text
 printGoExpr = \case
@@ -76,7 +79,7 @@ printGoExpr = \case
     printGoLiteral literal
 
   Go.AbsExpr param result body ->
-    printGoFunc Nothing param result (Go.ReturnStmnt body)
+    printGoFunc Nothing param result body
 
   Go.AppExpr _ lhs rhs ->
     case lhs of
@@ -87,6 +90,9 @@ printGoExpr = \case
 
   Go.VarExpr _ ident ->
     printGoIdent ident
+
+  Go.BlockExpr block ->
+    "(func() " <> printGoType (Go.getBlockType block) <> "{\n" <> printGoBlock block <> "})()"
 
   Go.TypeAssertExpr assertion expr ->
     printGoExpr expr <> ".(" <> printGoType assertion <> ")"

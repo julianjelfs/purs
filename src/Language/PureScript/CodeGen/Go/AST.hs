@@ -22,6 +22,8 @@ module Language.PureScript.CodeGen.Go.AST
   , objectType
   , emptyStructLiteral
   , emptyStructType
+  , return
+  , mapBlock
 
   -- * Types
   , Type(..)
@@ -33,7 +35,7 @@ module Language.PureScript.CodeGen.Go.AST
   , mapIdent
   ) where
 
-import Prelude.Compat
+import Prelude.Compat hiding (return)
 
 import qualified Language.PureScript.Names as PS
 import qualified Data.Text as Text
@@ -125,13 +127,37 @@ data BasicType
 data Block
   = ReturnStmnt Expr
   | AssignStmnt Ident Expr Block
+  | IfElseStmnt Expr Block Block
   deriving (Show)
+
+
+return :: Expr -> Block
+return = ReturnStmnt
+
+
+mapBlock :: (Expr -> Expr) -> Block -> Block
+mapBlock f = \case
+  ReturnStmnt expr ->
+    ReturnStmnt (f expr)
+
+  AssignStmnt ident expr block ->
+    AssignStmnt ident (f expr) (mapBlock f block)
+
+  IfElseStmnt expr block block' ->
+    IfElseStmnt (f expr) (mapBlock f block) (mapBlock f block')
 
 
 getBlockType :: Block -> Type
 getBlockType = \case
-  ReturnStmnt expr -> getExprType expr
-  AssignStmnt _ _ block -> getBlockType block
+  ReturnStmnt expr ->
+    getExprType expr
+
+  AssignStmnt _ _ block ->
+    getBlockType block
+
+  IfElseStmnt _ block _block ->
+    -- Assuming both blocks have the same type
+    getBlockType block
 
 
 -- | Go expression.
@@ -139,9 +165,10 @@ getBlockType = \case
 -- i.e. something that evaluates to a value
 data Expr
   = LiteralExpr Literal
-  | AbsExpr Field Type Expr    -- ^ function abstraction: func(foo int) int { ... }
+  | AbsExpr Field Type Block   -- ^ function abstraction: func(foo int) int { ... }
   | VarExpr Type Ident         -- ^ foo
   | AppExpr Type Expr Expr     -- ^ function application: foo(bar)
+  | BlockExpr Block            -- ^ (func() int { ...})()
   | TypeAssertExpr Type Expr   -- ^ foo.(int)
   | ReferenceExpr Expr         -- ^ &foo
   | DereferenceExpr Expr       -- ^ *foo
@@ -177,6 +204,7 @@ getExprType = \case
   LiteralExpr literal        -> getLiteralType literal
   AbsExpr param result _     -> FuncType (snd param) result
   VarExpr varType _          -> varType
+  BlockExpr block            -> getBlockType block
   TypeAssertExpr assertion _ -> assertion
   ReferenceExpr expr         -> PointerType (getExprType expr)
   DereferenceExpr expr       -> getExprType expr
@@ -210,9 +238,10 @@ getLiteralType = \case
 typeAssert :: Expr -> Expr
 typeAssert expr = case expr of
   LiteralExpr{}             -> expr
-  AbsExpr param result body -> AbsExpr param result (typeAssert body)
+  AbsExpr param result body -> AbsExpr param result (mapBlock typeAssert body)
   VarExpr{}                 -> expr
   TypeAssertExpr{}          -> expr
+  BlockExpr{}               -> expr -- I don't think this needs asserting?
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
 

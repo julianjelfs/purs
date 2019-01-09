@@ -8,6 +8,7 @@ import Prelude.Compat
 import qualified Data.Text as Text
 import qualified Data.Map as Map
 import qualified Language.PureScript.CodeGen.Go.AST as Go
+import qualified Language.PureScript.CodeGen.Go.Optimizer as Optimizer
 import qualified Language.PureScript.CoreFn as CoreFn
 import qualified Language.PureScript.Names as Names
 import qualified Language.PureScript.Constants as Constants
@@ -18,7 +19,6 @@ import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
-import Data.Map (Map)
 import Data.Function ((&))
 import Data.Maybe (mapMaybe)
 import Data.Bifunctor (bimap)
@@ -40,7 +40,8 @@ moduleToGo
   -> FilePath
   -- ^ Import path prefix (e.g. goModuleName/outputDir)
   -> m Go.File
-moduleToGo core importPrefix = pure Go.File {..}
+moduleToGo core importPrefix =
+  pure Go.File { fileDecls = Optimizer.optimize <$> fileDecls, ..}
   where
   filePackage :: Go.Package
   filePackage =
@@ -71,6 +72,26 @@ moduleNameToImport dir mn =
   Go.Import (Go.packageFromModuleName mn) (addDir dir (Names.runModuleName mn))
 
 
+data Context = Context
+    { currentModule :: Names.ModuleName
+    , moduleExports :: [Names.Ident]
+    }
+
+
+mkContext :: CoreFn.Module CoreFn.Ann -> Context
+mkContext CoreFn.Module {..} =
+  Context moduleName (moduleExports <> fmap unTypeName exportedTypeNames)
+  where
+  exportedTypeNames :: [Names.ProperName 'Names.TypeName]
+  exportedTypeNames = mapMaybe getExportedTypeName (flattenBinds moduleDecls)
+
+  getExportedTypeName :: Bind -> Maybe (Names.ProperName 'Names.TypeName)
+  getExportedTypeName (Bind _ ident expr) = case expr of
+    CoreFn.Constructor _ typeName _ _
+      | ident `elem` moduleExports -> Just typeName
+    _ -> Nothing
+
+
 data Bind = Bind
   { _bindAnn   :: CoreFn.Ann
   , _bindIdent :: Names.Ident
@@ -94,6 +115,14 @@ flattenBind = \case
 extractTypeDecls :: Context -> [Bind] -> [Go.Decl]
 extractTypeDecls context = fmap (uncurry typeDecl) . Map.toList . typeMap
   where
+  typeMap [] = Map.empty
+  typeMap (Bind _ _ expr : rest) =
+    case expr of
+      CoreFn.Constructor _ann typeName ctorName values ->
+        Map.insertWith (<>) typeName [(ctorName, values)] (typeMap rest)
+      _ ->
+        typeMap rest
+
   typeDecl
     :: Names.ProperName 'Names.TypeName
     -> [(Names.ProperName 'Names.ConstructorName, [Names.Ident])]
@@ -112,19 +141,6 @@ extractTypeDecls context = fmap (uncurry typeDecl) . Map.toList . typeMap
         (\value -> (localIdent value, Go.EmptyInterfaceType)) <$> values
     )
 
-  typeMap
-    :: [Bind]
-    -> Map
-       (Names.ProperName 'Names.TypeName)
-       [(Names.ProperName 'Names.ConstructorName, [Names.Ident])]
-  typeMap [] = Map.empty
-  typeMap (Bind _ _ expr : rest) =
-    case expr of
-      CoreFn.Constructor _ann typeName ctorName values ->
-        Map.insertWith (<>) typeName [(ctorName, values)] (typeMap rest)
-      _ ->
-        typeMap rest
-
 
 {- TODO: Proper error handling -}
 
@@ -138,16 +154,11 @@ bindToGo context (Bind _ ident expr) = case expr of
              (identToGo (moduleExports context) ident)
              (localIdent arg, typeToGo context argType)
              (typeToGo context returnType)
-             (Go.ReturnStmnt $ valueToGo context body)
+             (Go.return $ valueToGo context body)
          ]
        Just _  -> undefined
        Nothing -> undefined
 
-  -- TODO: Trying to recreate
-  -- https://gist.github.com/jmackie/34fbe817752dc788f194f07b555b50b8
-  --
-  -- Which will require an extra step to extract type from decls
-  --
   CoreFn.Constructor _ann typeName ctorName [] ->
     let typeIdent = typeNameIdent context typeName in
     [ Go.VarDecl
@@ -168,7 +179,7 @@ bindToGo context (Bind _ ident expr) = case expr of
   _ ->
     case typeToGo context <$> annType (CoreFn.extractAnn expr) of
       Just gotype ->
-        -- TODO: Use `const` where possible
+        -- TODO: Replace for const (where possible) in the optimization pass
         [ Go.VarDecl
             (identToGo (moduleExports context) ident)
              gotype
@@ -189,7 +200,7 @@ constructorFunc context typeName ctorName (ctor :| ctors) =
     (identToGo (moduleExports context) (unConstructorName ctorName))
     (localIdent ctor, Go.EmptyInterfaceType)
     `uncurry`
-    (Go.ReturnStmnt <$> go ctors)
+    (Go.return <$> go ctors)
   where
   go :: [Names.Ident] -> (Go.Type, Go.Expr)
   go [] =
@@ -203,7 +214,8 @@ constructorFunc context typeName ctorName (ctor :| ctors) =
                    (localIdent ctor', Go.EmptyInterfaceType))
                    (ctor : ctors))
                 (fmap (\ctor' ->
-                   (localIdent ctor', Go.VarExpr Go.EmptyInterfaceType (localIdent ctor)))
+                   (localIdent ctor',
+                      Go.VarExpr Go.EmptyInterfaceType (localIdent ctor)))
                    (ctor : ctors))
           )
         ]
@@ -211,7 +223,7 @@ constructorFunc context typeName ctorName (ctor :| ctors) =
   go (ctor' : rest) =
     let (gotype, expr) = go rest in
     ( Go.FuncType Go.EmptyInterfaceType gotype
-    , Go.AbsExpr (localIdent ctor', Go.EmptyInterfaceType) gotype expr
+    , Go.AbsExpr (localIdent ctor', Go.EmptyInterfaceType) gotype (Go.return expr)
     )
 
 
@@ -226,7 +238,7 @@ valueToGo context = Go.typeAssert . \case
         Go.AbsExpr
           (localIdent arg, typeToGo context argType)
           (typeToGo context returnType)
-          (valueToGo context body)
+          (Go.return $ valueToGo context body)
       Just _  -> undefined
       Nothing -> undefined
 
@@ -257,7 +269,7 @@ valueToGo context = Go.typeAssert . \case
   expr -> Go.TodoExpr (show expr)
 
 
--- | TODO: Optimise this away.
+-- | TODO: Optimize this to assignments.
 --
 mkAssignments :: Context -> CoreFn.Expr CoreFn.Ann -> [Bind] -> Go.Expr
 mkAssignments context expr = go
@@ -272,7 +284,7 @@ mkAssignments context expr = go
       (Go.AbsExpr
          (localIdent ident, Go.getExprType bind)
          (Go.getExprType result)
-          result
+         (Go.return result)
       )
       bind
 
@@ -353,26 +365,6 @@ typeToGo context = \case
   ty -> Go.UnknownType (show ty)
 
 
-data Context = Context
-    { currentModule :: Names.ModuleName
-    , moduleExports :: [Names.Ident]
-    }
-
-
-mkContext :: CoreFn.Module CoreFn.Ann -> Context
-mkContext CoreFn.Module {..} =
-  Context moduleName (moduleExports <> fmap unTypeName exportedTypeNames)
-  where
-  exportedTypeNames :: [Names.ProperName 'Names.TypeName]
-  exportedTypeNames = mapMaybe getExportedTypeName (flattenBinds moduleDecls)
-
-  getExportedTypeName :: Bind -> Maybe (Names.ProperName 'Names.TypeName)
-  getExportedTypeName (Bind _ ident expr) = case expr of
-    CoreFn.Constructor _ typeName _ _
-      | ident `elem` moduleExports -> Just typeName
-    _ -> Nothing
-
-
 -- IDENTIFIERS
 
 
@@ -395,6 +387,7 @@ qualifiedIdentToGo Context {..} = \case
 
 
 -- | NOTE: We need to append "Type" here because there is only one namespace.
+--
 unTypeName :: Names.ProperName 'Names.TypeName -> Names.Ident
 unTypeName typeName = Names.Ident (Names.runProperName typeName <> "Type")
 
@@ -471,10 +464,3 @@ pattern Prim t <-
 pattern FunctionApp :: Types.Type -> Types.Type -> Types.Type
 pattern FunctionApp lhs rhs <-
   Types.TypeApp (Types.TypeApp (Prim "Function") lhs) rhs
-
-
--- RECYCLING
-
-
-_narrowT :: Int -> Text -> Text
-_narrowT i = Text.dropEnd i . Text.drop i
