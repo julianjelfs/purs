@@ -4,9 +4,9 @@ module Language.PureScript.CodeGen.Go
   ) where
 
 import Prelude.Compat
---import Debug.Trace (traceShowId)
 
 import qualified Data.Text as Text
+import qualified Data.Map as Map
 import qualified Language.PureScript.CodeGen.Go.AST as Go
 import qualified Language.PureScript.CoreFn as CoreFn
 import qualified Language.PureScript.Names as Names
@@ -18,6 +18,7 @@ import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
+import Data.Map (Map)
 import Data.Function ((&))
 import Data.Maybe (mapMaybe)
 import Data.Bifunctor (bimap)
@@ -51,7 +52,9 @@ moduleToGo core importPrefix = pure Go.File {..}
 
   fileDecls :: [Go.Decl]
   fileDecls =
-    bindToGo (mkContext core) `concatMap` flattenBinds (CoreFn.moduleDecls core)
+    let context = mkContext core
+        binds   = flattenBinds (CoreFn.moduleDecls core)
+    in  extractTypeDecls context binds <> foldMap (bindToGo context) binds
 
 
 -- | CoreFn.moduleImports with filtering.
@@ -86,6 +89,41 @@ flattenBind = \case
 
   CoreFn.Rec rec ->
     uncurry (uncurry Bind) <$> rec
+
+
+extractTypeDecls :: Context -> [Bind] -> [Go.Decl]
+extractTypeDecls context = fmap (uncurry typeDecl) . Map.toList . typeMap
+  where
+  typeDecl
+    :: Names.ProperName 'Names.TypeName
+    -> [(Names.ProperName 'Names.ConstructorName, [Names.Ident])]
+    -> Go.Decl
+  typeDecl typeName =
+    Go.TypeDecl (typeNameIdent context typeName) .
+      Go.StructType . fmap (uncurry constructorToField)
+
+  constructorToField
+    :: Names.ProperName 'Names.ConstructorName
+    -> [Names.Ident]
+    -> Go.Field
+  constructorToField ctorName values =
+    ( constructorNameProperty ctorName
+    , Go.PointerType . Go.StructType $
+        (\value -> (localIdent value, Go.EmptyInterfaceType)) <$> values
+    )
+
+  typeMap
+    :: [Bind]
+    -> Map
+       (Names.ProperName 'Names.TypeName)
+       [(Names.ProperName 'Names.ConstructorName, [Names.Ident])]
+  typeMap [] = Map.empty
+  typeMap (Bind _ _ expr : rest) =
+    case expr of
+      CoreFn.Constructor _ann typeName ctorName values ->
+        Map.insertWith (<>) typeName [(ctorName, values)] (typeMap rest)
+      _ ->
+        typeMap rest
 
 
 {- TODO: Proper error handling -}
