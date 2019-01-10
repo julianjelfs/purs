@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -fno-warn-unused-imports   #-}
+{-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 module Language.PureScript.CodeGen.Go
   ( module Plumbing
   , moduleToGo
@@ -20,6 +22,7 @@ import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
 import Data.Function ((&))
+import Data.Foldable (foldl')
 import Data.Maybe (mapMaybe)
 import Data.Bifunctor (first, bimap)
 import Data.Functor ((<&>))
@@ -221,6 +224,7 @@ constructorFunc context typeName ctorName (ctor :| ctors) =
           )
         ]
     )
+
   go (ctor' : rest) =
     let (gotype, expr) = go rest in
     ( Go.FuncType Go.EmptyInterfaceType gotype
@@ -271,81 +275,102 @@ valueToGo context = Go.typeAssert . \case
   expr -> Go.TodoExpr (show expr)
 
 
+-- | TODO: Refactor this
 caseToGo
   :: Context
   -> CoreFn.Ann
   -> [CoreFn.Expr CoreFn.Ann]
   -> [CoreFn.CaseAlternative CoreFn.Ann]
   -> Go.Expr
-caseToGo context ann exprs caseAlternatives =
-  Go.BlockExpr (foldr (uncurry Go.IfElseStmnt) failBlock conditionalBlocks)
-  where
-  conditionalBlocks :: [(Go.Expr, Go.Block)]
-  conditionalBlocks = concatMap mkBlocks caseAlternatives
-    where
-    mkBlocks :: CoreFn.CaseAlternative CoreFn.Ann -> [(Go.Expr, Go.Block)]
-    --mkBlocks (CoreFn.CaseAlternative [] _) = undefined
-    mkBlocks (CoreFn.CaseAlternative binders result) =
-      case result of
-        Left guards ->
-          guards <&> \(guard, expr) ->
-            first (foldConditions . (`snoc` valueToGo context guard)) $
-              foldr
-                (\(expr', binder) (conditions, block) ->
-                    bimap (maybe conditions (snoc conditions)) ($ block)
-                      (mkCondition expr' binder)
-                )
-                ([], Go.return (valueToGo context expr))
-                (zip exprs binders)
+caseToGo _context _ann _exprs _caseAlternatives = undefined
+  --Go.BlockExpr (foldr (uncurry Go.IfElseStmnt) failBlock conditionalBlocks)
+  --where
+  --conditionalBlocks :: [(Go.Expr, Go.Block)]
+  --conditionalBlocks = concatMap mkBlocks caseAlternatives
+  --  where
+  --  mkBlocks :: CoreFn.CaseAlternative CoreFn.Ann -> [(Go.Expr, Go.Block)]
+  --  --mkBlocks (CoreFn.CaseAlternative [] _) = undefined
+  --  mkBlocks (CoreFn.CaseAlternative binders result) =
+  --    case result of
+  --      Left guards ->
+  --        -- FIXME: guards should be nested ifs (that's what the js does)
+  --        guards <&> \(guard, expr) ->
+  --          first (foldConditions . (`snoc` valueToGo context guard)) $
+  --            foldr
+  --              (\(expr', binder) (conditions, block) ->
+  --                  bimap (maybe conditions (snoc conditions)) ($ block)
+  --                    (mkCondition expr' binder)
+  --              )
+  --              ([], Go.return (valueToGo context expr))
+  --              (zip exprs binders)
 
-        Right expr ->
-          [ first foldConditions $
-              foldr
-                (\(expr', binder) (conditions, block) ->
-                    bimap (maybe conditions (snoc conditions)) ($ block)
-                      (mkCondition expr' binder)
-                )
-                ([], Go.return (valueToGo context expr))
-                (zip exprs binders)
-          ]
+  --      Right expr ->
+  --        [ first foldConditions $
+  --            foldr
+  --              (\(expr', binder) (conditions, block) ->
+  --                  bimap (maybe conditions (snoc conditions)) ($ block)
+  --                    (mkCondition expr' binder)
+  --              )
+  --              ([], Go.return (valueToGo context expr))
+  --              (zip exprs binders)
+  --        ]
 
-  mkCondition
-    :: CoreFn.Expr CoreFn.Ann
-    -> CoreFn.Binder CoreFn.Ann
-    -> (Maybe Go.Condition, Go.Block -> Go.Block)
-  mkCondition expr = \case
-    CoreFn.ConstructorBinder _ann typeName ctorName _binders ->
-      --let (_, _) = mkCondition
-      ( Just . Go.notNil $ Go.StructAccessorExpr
-          undefined
-          (valueToGo context
-             (injectAnnType (Types.TypeConstructor typeName) <$> expr)
-          )
-          (constructorNameProperty $ Names.disqualify ctorName)
-      , id
-      --, Go.AssignStmnt (Go.LocalIdent "foo") Go.emptyStructLiteral
-      )
+  --mkCondition
+  --  :: CoreFn.Expr CoreFn.Ann
+  --  -> CoreFn.Binder CoreFn.Ann
+  --  -> (Maybe Go.Condition, Go.Block -> Go.Block)
+  --mkCondition expr = \case
+  --  CoreFn.ConstructorBinder (SumType _values) typeName ctorName binders ->
+  --    ( Just . Go.notNil . seq ann $ Go.StructAccessorExpr
+  --        undefined
+  --        (valueToGo context
+  --           (injectAnnType (Types.TypeConstructor typeName) <$> expr)
+  --        )
+  --        (constructorNameProperty $ Names.disqualify ctorName)
+  --    , error (show binders)
+  --    )
 
-    --CoreFn.VarBinder _ann _ident ->
-    --  ( Nothing
-    --  ,
-    --  )
-    --  undefined
+  --  --CoreFn.VarBinder _ann _ident ->
+  --  --  ( Nothing
+  --  --  ,
+  --  --  )
+  --  --  undefined
 
-      --error (show ann' <> show typeName <> show ctorName <> show binders)
-    binder ->
-      error (show binder)
+  --  --error (show ann' <> show typeName <> show ctorName <> show binders)
+  --  binder ->
+  --    error (show binder)
 
-  foldConditions :: [Go.Condition] -> Go.Condition
-  foldConditions [] = undefined -- Go.LiteralExpr (Go.BoolExpr True)
-  foldConditions [condition] = condition
-  foldConditions (condition : conditions) = foldr Go.and condition conditions
+  --foldConditions :: [Go.Condition] -> Go.Condition
+  --foldConditions [] = undefined -- Go.LiteralExpr (Go.BoolExpr True)
+  --foldConditions [condition] = condition
+  --foldConditions (condition : conditions) = foldl' Go.and condition conditions
 
-  -- TODO
-  failBlock :: Go.Block
-  failBlock =
-    Go.panic (maybe undefined (typeToGo context) (annType ann))
-      "Failed pattern match"
+  ---- TODO
+  --failBlock :: Go.Block
+  --failBlock =
+  --  Go.panic (maybe undefined (typeToGo context) (annType ann))
+  --    "Failed pattern match"
+
+
+-- | Is this the right way to do it?
+--
+binderToGo
+  :: Text
+  -> CoreFn.Expr CoreFn.Ann
+  -> CoreFn.Binder CoreFn.Ann
+  -> Go.Expr
+binderToGo _valueName _base = \case
+  CoreFn.NullBinder{} ->
+    undefined
+
+  CoreFn.VarBinder _ _ident ->
+    undefined
+
+  CoreFn.LiteralBinder _ann _literal ->
+    undefined
+
+  _ ->
+    undefined
 
 
 letToGo    -- let it go, let it gooo
@@ -357,17 +382,7 @@ letToGo context binds expr = go (flattenBinds binds)
   where
   go [] = valueToGo context expr
   go (Bind _ ident value : rest) =
-    let bind   = valueToGo context value
-        result = go rest
-    in
-    Go.AppExpr
-      (Go.getExprType result)
-      (Go.AbsExpr
-         (localIdent ident, Go.getExprType bind)
-         (Go.getExprType result)
-         (Go.return result)
-      )
-      bind
+    Go.letExpr (localIdent ident) (valueToGo context value) (go rest)
 
 
 literalToGo
@@ -554,3 +569,8 @@ pattern Prim t <-
 pattern FunctionApp :: Types.Type -> Types.Type -> Types.Type
 pattern FunctionApp lhs rhs <-
   Types.TypeApp (Types.TypeApp (Prim "Function") lhs) rhs
+
+
+pattern SumType :: [Names.Ident] -> CoreFn.Ann
+pattern SumType values <-
+  (_, _, _, Just (CoreFn.IsConstructor CoreFn.SumType values))

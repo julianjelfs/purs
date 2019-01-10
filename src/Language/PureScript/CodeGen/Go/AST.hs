@@ -29,6 +29,7 @@ module Language.PureScript.CodeGen.Go.AST
   , mapBlock
   , and
   , notNil
+  , letExpr
 
   -- * Types
   , Type(..)
@@ -301,6 +302,14 @@ typeAssert expr = case expr of
 
   -- XXX
   TodoExpr{} -> expr
+
+
+letExpr :: Ident -> Expr -> Expr -> Expr
+letExpr ident lhs rhs =
+  AppExpr
+    (getExprType rhs)
+    (AbsExpr (ident, getExprType lhs) (getExprType rhs) (return rhs))
+    lhs
 
 
 -- | Go "object" (kinda)
