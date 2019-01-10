@@ -260,24 +260,38 @@ valueToGo context = Go.typeAssert . \case
 
       _ -> undefined
 
-  -- CoreFn.Case ann exprs cases
+  CoreFn.Case _ann exprs cases ->
+    caseToGo context exprs cases
 
   CoreFn.Let _ann binds expr ->
-    mkAssignments context expr (flattenBinds binds)
+    letToGo context binds expr
 
   -- XXX
   expr -> Go.TodoExpr (show expr)
 
 
--- | TODO: Optimize this to assignments.
---
-mkAssignments :: Context -> CoreFn.Expr CoreFn.Ann -> [Bind] -> Go.Expr
-mkAssignments context expr = go
+caseToGo
+  :: Context
+  -> [CoreFn.Expr CoreFn.Ann]
+  -> [CoreFn.CaseAlternative CoreFn.Ann]
+  -> Go.Expr
+caseToGo _context exprs cases =
+  Go.BlockExpr $ Go.return (Go.TodoExpr $ show exprs <> show cases)
+  -- TODO: zippy zip
+  where
+
+
+letToGo
+  :: Context
+  -> [CoreFn.Bind CoreFn.Ann]
+  -> CoreFn.Expr CoreFn.Ann
+  -> Go.Expr
+letToGo context binds expr = go (flattenBinds binds)
   where
   go [] = valueToGo context expr
-  go (Bind _ ident value : binds) =
+  go (Bind _ ident value : rest) =
     let bind   = valueToGo context value
-        result = go binds
+        result = go rest
     in
     Go.AppExpr
       (Go.getExprType result)

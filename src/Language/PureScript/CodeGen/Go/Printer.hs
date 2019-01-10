@@ -103,6 +103,9 @@ printGoExpr = \case
   Go.DereferenceExpr expr ->
     "*" <> printGoExpr expr
 
+  Go.PanicExpr _ why ->
+    "panic(" <> why <> ")"
+
   -- XXX
   Go.TodoExpr what ->
     "/* TODO: " <> showT what <> "*/"
@@ -179,6 +182,9 @@ printGoType = \case
 
   Go.PointerType gotype ->
     "*" <> printGoType gotype
+
+  Go.PanicType gotype ->
+    printGoType gotype
 
   -- XXX
   Go.UnknownType what ->
