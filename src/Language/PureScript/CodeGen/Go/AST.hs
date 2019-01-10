@@ -129,6 +129,7 @@ data Block
   = ReturnStmnt Expr
   | AssignStmnt Ident Expr Block
   | IfElseStmnt Expr Block Block
+  | PanicStmnt Type Text
   deriving (Show)
 
 
@@ -147,6 +148,9 @@ mapBlock f = \case
   IfElseStmnt expr block block' ->
     IfElseStmnt (f expr) (mapBlock f block) (mapBlock f block')
 
+  block@PanicStmnt{} ->
+    block
+
 
 getBlockType :: Block -> Type
 getBlockType = \case
@@ -159,6 +163,9 @@ getBlockType = \case
   IfElseStmnt _ block _block ->
     -- Assuming both blocks have the same type
     getBlockType block
+
+  PanicStmnt panicType _ ->
+    PanicType panicType
 
 
 -- | Go expression.
@@ -173,7 +180,6 @@ data Expr
   | TypeAssertExpr Type Expr   -- ^ foo.(int)
   | ReferenceExpr Expr         -- ^ &foo
   | DereferenceExpr Expr       -- ^ *foo
-  | PanicExpr Type Text        -- ^ panic("aaahhhh")
 
   -- XXX
   | TodoExpr String
@@ -210,7 +216,6 @@ getExprType = \case
   TypeAssertExpr assertion _ -> assertion
   ReferenceExpr expr         -> PointerType (getExprType expr)
   DereferenceExpr expr       -> getExprType expr
-  PanicExpr gotype _         -> PanicType gotype
 
   -- Return the _actual_ return type rather than
   -- the type it's _supposed_ to return.
@@ -247,7 +252,6 @@ typeAssert expr = case expr of
   BlockExpr{}               -> expr -- I don't think this needs asserting?
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
-  PanicExpr{}               -> expr
 
   -- NOTE: stopping at the outermost App rather than recursing
   AppExpr want lhs rhs ->

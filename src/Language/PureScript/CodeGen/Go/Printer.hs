@@ -72,6 +72,9 @@ printGoBlock = \case
   Go.IfElseStmnt cond yes no ->
     "if " <> printGoExpr cond <> " {\n" <> printGoBlock yes <> "}\n" <> printGoBlock no
 
+  Go.PanicStmnt _ why ->
+    "panic(" <> why <> ");"
+
 
 printGoExpr :: Go.Expr -> Text
 printGoExpr = \case
@@ -102,9 +105,6 @@ printGoExpr = \case
 
   Go.DereferenceExpr expr ->
     "*" <> printGoExpr expr
-
-  Go.PanicExpr _ why ->
-    "panic(" <> why <> ")"
 
   -- XXX
   Go.TodoExpr what ->
