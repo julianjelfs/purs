@@ -21,7 +21,8 @@ import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
 import Data.Function ((&))
 import Data.Maybe (mapMaybe)
-import Data.Bifunctor (bimap)
+import Data.Bifunctor (first, bimap)
+import Data.Functor ((<&>))
 import Control.Monad.Reader (MonadReader)
 import Control.Monad.Supply.Class (MonadSupply)
 import Language.PureScript.Errors (MultipleErrors)
@@ -260,8 +261,8 @@ valueToGo context = Go.typeAssert . \case
 
       _ -> undefined
 
-  CoreFn.Case _ann exprs cases ->
-    caseToGo context exprs cases
+  CoreFn.Case ann exprs cases ->
+    caseToGo context ann exprs cases
 
   CoreFn.Let _ann binds expr ->
     letToGo context binds expr
@@ -272,16 +273,70 @@ valueToGo context = Go.typeAssert . \case
 
 caseToGo
   :: Context
+  -> CoreFn.Ann
   -> [CoreFn.Expr CoreFn.Ann]
   -> [CoreFn.CaseAlternative CoreFn.Ann]
   -> Go.Expr
-caseToGo _context exprs cases =
-  Go.BlockExpr $ Go.return (Go.TodoExpr $ show exprs <> show cases)
-  -- TODO: zippy zip
+caseToGo context ann exprs caseAlternatives =
+  Go.BlockExpr (foldr (uncurry Go.IfElseStmnt) failBlock conditionalBlocks)
   where
+  conditionalBlocks :: [(Go.Expr, Go.Block)]
+  conditionalBlocks = concatMap mkBlocks caseAlternatives
+    where
+    mkBlocks :: CoreFn.CaseAlternative CoreFn.Ann -> [(Go.Expr, Go.Block)]
+    --mkBlocks (CoreFn.CaseAlternative [] _) = undefined
+    mkBlocks (CoreFn.CaseAlternative binders result) =
+      case result of
+        Left guards ->
+          guards <&> \(guard, expr) ->
+            first (foldConditions . (`snoc` valueToGo context guard)) $
+              foldr
+                (\(expr', binder) (conditions, block) ->
+                    bimap (: conditions) ($ block) (mkCondition expr' binder)
+                )
+                ([], Go.return (valueToGo context expr))
+                (zip exprs binders)
+
+        Right expr ->
+          [ first foldConditions $
+              foldr
+                (\(expr', binder) (conditions, block) ->
+                    bimap (: conditions) ($ block) (mkCondition expr' binder)
+                )
+                ([], Go.return (valueToGo context expr))
+                (zip exprs binders)
+          ]
+
+  mkCondition
+    :: CoreFn.Expr CoreFn.Ann
+    -> CoreFn.Binder CoreFn.Ann
+    -> (Go.Condition, Go.Block -> Go.Block)
+  mkCondition expr = \case
+    CoreFn.ConstructorBinder _ann _typeName ctorName _binders ->
+      ( Go.notNil $ Go.StructAccessorExpr
+          undefined
+          (valueToGo context expr)
+          (constructorNameProperty $ Names.disqualify ctorName)
+      , id
+      )
+
+      --error (show ann' <> show typeName <> show ctorName <> show binders)
+    binder ->
+      error (show binder)
+
+  foldConditions :: [Go.Condition] -> Go.Condition
+  foldConditions [] = undefined -- Go.LiteralExpr (Go.BoolExpr True)
+  foldConditions [condition] = condition
+  foldConditions (condition : conditions) = foldr Go.and condition conditions
+
+  -- TODO
+  failBlock :: Go.Block
+  failBlock =
+    Go.panic (maybe undefined (typeToGo context) (annType ann))
+      "Failed pattern match"
 
 
-letToGo
+letToGo    -- let it go, let it gooo
   :: Context
   -> [CoreFn.Bind CoreFn.Ann]
   -> CoreFn.Expr CoreFn.Ann
@@ -465,6 +520,10 @@ addDir dir base = Text.pack (dir </> Text.unpack base)
 
 showT :: Show a => a -> Text
 showT = Text.pack . show
+
+
+snoc :: [a] -> a -> [a]
+snoc as a = as <> [a]
 
 
 -- PATTERN SYNONYMS

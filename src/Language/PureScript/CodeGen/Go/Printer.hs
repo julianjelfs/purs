@@ -18,9 +18,9 @@ import Data.Monoid (Endo(..))
 printGo :: Go.File -> Text
 printGo Go.File {..} =
   Text.intercalate "\n\n"
-    (packageHeader :
-    (printGoImport  <$> fileImports) <>
-    (printGoDecl    <$> fileDecls))
+    (packageHeader                  :     -- package Foo
+    (printGoImport <$> fileImports) <>    -- [import Data_Maybe "path"]
+    (printGoDecl   <$> fileDecls))        -- [func ... | var ... | const ...]
   where
   packageHeader :: Text
   packageHeader = "package " <> printGoPackage filePackage
@@ -63,23 +63,30 @@ printGoFunc funcName param result body = Text.concat
 
 printGoBlock :: Go.Block -> Text
 printGoBlock = \case
+  -- Base cases
   Go.ReturnStmnt expr  ->
     "return " <> printGoExpr expr <> ";"
 
+  Go.PanicStmnt _ why ->
+    "panic(\"" <> why <> "\");"
+
+  -- Inductive cases
   Go.AssignStmnt ident expr block ->
     printGoIdent ident <> " := " <> printGoExpr expr <> "; " <> printGoBlock block
 
   Go.IfElseStmnt cond yes no ->
+    -- NOTE: We can omit the `else` because blocks must always
+    -- terminate with a return (or a panic)
     "if " <> printGoExpr cond <> " {\n" <> printGoBlock yes <> "}\n" <> printGoBlock no
-
-  Go.PanicStmnt _ why ->
-    "panic(" <> why <> ");"
 
 
 printGoExpr :: Go.Expr -> Text
 printGoExpr = \case
   Go.LiteralExpr literal ->
     printGoLiteral literal
+
+  Go.BooleanOpExpr booleanOp ->
+    printGoBooleanOp booleanOp
 
   Go.AbsExpr param result body ->
     printGoFunc Nothing param result body
@@ -105,6 +112,12 @@ printGoExpr = \case
 
   Go.DereferenceExpr expr ->
     "*" <> printGoExpr expr
+
+  Go.StructAccessorExpr _ expr ident ->
+    printGoExpr expr <> "." <> printGoIdent ident
+
+  Go.NilExpr ->
+    "nil"
 
   -- XXX
   Go.TodoExpr what ->
@@ -186,9 +199,24 @@ printGoType = \case
   Go.PanicType gotype ->
     printGoType gotype
 
+  Go.NilType ->
+    undefined
+
   -- XXX
   Go.UnknownType what ->
     "interface{} /* " <> Text.pack what <> "*/"
+
+
+printGoBooleanOp :: Go.BooleanOp -> Text
+printGoBooleanOp = \case
+  Go.AndOp lhs rhs ->
+    printGoExpr lhs <> " && " <> printGoExpr rhs
+
+  Go.EqOp lhs rhs ->
+    printGoExpr lhs <> " == " <> printGoExpr rhs
+
+  Go.NotEqOp lhs rhs ->
+    printGoExpr lhs <> " != " <> printGoExpr rhs
 
 
 printGoBasicType :: Go.BasicType -> Text

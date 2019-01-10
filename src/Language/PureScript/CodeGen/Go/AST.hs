@@ -11,8 +11,10 @@ module Language.PureScript.CodeGen.Go.AST
 
   -- * Expressions
   , Expr(..)
+  , BooleanOp(..)
   , Block(..)
   , Literal(..)
+  , Condition
   , KeyValue
   , Field
   , getExprType
@@ -23,7 +25,10 @@ module Language.PureScript.CodeGen.Go.AST
   , emptyStructLiteral
   , emptyStructType
   , return
+  , panic
   , mapBlock
+  , and
+  , notNil
 
   -- * Types
   , Type(..)
@@ -35,7 +40,7 @@ module Language.PureScript.CodeGen.Go.AST
   , mapIdent
   ) where
 
-import Prelude.Compat hiding (return)
+import Prelude.Compat hiding (return, and)
 
 import qualified Language.PureScript.Names as PS
 import qualified Data.Text as Text
@@ -94,6 +99,7 @@ data Type
   | NamedType Ident
   | PointerType Type
   | PanicType Type
+  | NilType
 
   -- XXX
   | UnknownType String
@@ -128,13 +134,17 @@ data BasicType
 data Block
   = ReturnStmnt Expr
   | AssignStmnt Ident Expr Block
-  | IfElseStmnt Expr Block Block
+  | IfElseStmnt Condition Block Block
   | PanicStmnt Type Text
   deriving (Show)
 
 
 return :: Expr -> Block
 return = ReturnStmnt
+
+
+panic :: Type -> Text -> Block
+panic = PanicStmnt
 
 
 mapBlock :: (Expr -> Expr) -> Block -> Block
@@ -173,17 +183,35 @@ getBlockType = \case
 -- i.e. something that evaluates to a value
 data Expr
   = LiteralExpr Literal
-  | AbsExpr Field Type Block   -- ^ function abstraction: func(foo int) int { ... }
-  | VarExpr Type Ident         -- ^ foo
-  | AppExpr Type Expr Expr     -- ^ function application: foo(bar)
-  | BlockExpr Block            -- ^ (func() int { ...})()
-  | TypeAssertExpr Type Expr   -- ^ foo.(int)
-  | ReferenceExpr Expr         -- ^ &foo
-  | DereferenceExpr Expr       -- ^ *foo
+  | BooleanOpExpr BooleanOp
+  | AbsExpr Field Type Block           -- ^ function abstraction: func(foo int) int { ... }
+  | VarExpr Type Ident                 -- ^ foo
+  | AppExpr Type Expr Expr             -- ^ function application: foo(bar)
+  | BlockExpr Block                    -- ^ (func() int { ...})()
+  | TypeAssertExpr Type Expr           -- ^ foo.(int)
+  | ReferenceExpr Expr                 -- ^ &foo
+  | DereferenceExpr Expr               -- ^ *foo
+  | StructAccessorExpr Type Expr Ident -- ^ foo.bar
+  | NilExpr                            -- ^ nil
 
   -- XXX
   | TodoExpr String
   deriving (Show)
+
+
+data BooleanOp
+  = AndOp   Expr Expr
+  | EqOp    Expr Expr
+  | NotEqOp Expr Expr
+  deriving (Show)
+
+
+and :: Expr -> Expr -> Expr
+and = (BooleanOpExpr .) . AndOp
+
+
+notNil :: Expr -> Expr
+notNil = BooleanOpExpr . flip NotEqOp NilExpr
 
 
 data Literal
@@ -199,6 +227,9 @@ data Literal
   deriving (Show)
 
 
+type Condition = Expr
+
+
 emptyStructLiteral :: Expr
 emptyStructLiteral = LiteralExpr (StructLiteral [] [])
 
@@ -210,12 +241,15 @@ emptyStructType = StructType []
 getExprType :: Expr -> Type
 getExprType = \case
   LiteralExpr literal        -> getLiteralType literal
+  BooleanOpExpr _            -> BasicType BoolType
   AbsExpr param result _     -> FuncType (snd param) result
   VarExpr varType _          -> varType
   BlockExpr block            -> getBlockType block
   TypeAssertExpr assertion _ -> assertion
   ReferenceExpr expr         -> PointerType (getExprType expr)
   DereferenceExpr expr       -> getExprType expr
+  StructAccessorExpr t _ _   -> t
+  NilExpr                    -> NilType
 
   -- Return the _actual_ return type rather than
   -- the type it's _supposed_ to return.
@@ -246,12 +280,15 @@ getLiteralType = \case
 typeAssert :: Expr -> Expr
 typeAssert expr = case expr of
   LiteralExpr{}             -> expr
+  BooleanOpExpr{}           -> expr
   AbsExpr param result body -> AbsExpr param result (mapBlock typeAssert body)
   VarExpr{}                 -> expr
   TypeAssertExpr{}          -> expr
   BlockExpr{}               -> expr -- I don't think this needs asserting?
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
+  StructAccessorExpr{}      -> expr
+  NilExpr                   -> expr
 
   -- NOTE: stopping at the outermost App rather than recursing
   AppExpr want lhs rhs ->
