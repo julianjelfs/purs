@@ -42,7 +42,7 @@ moduleToGo
   -- ^ Import path prefix (e.g. goModuleName/outputDir)
   -> m Go.File
 moduleToGo core importPrefix =
-  pure Go.File { fileDecls = Optimizer.optimize <$> fileDecls, ..}
+  pure . Optimizer.optimize $ Go.File {..}
   where
   filePackage :: Go.Package
   filePackage =
@@ -292,7 +292,8 @@ caseToGo context ann exprs caseAlternatives =
             first (foldConditions . (`snoc` valueToGo context guard)) $
               foldr
                 (\(expr', binder) (conditions, block) ->
-                    bimap (: conditions) ($ block) (mkCondition expr' binder)
+                    bimap (maybe conditions (snoc conditions)) ($ block)
+                      (mkCondition expr' binder)
                 )
                 ([], Go.return (valueToGo context expr))
                 (zip exprs binders)
@@ -301,7 +302,8 @@ caseToGo context ann exprs caseAlternatives =
           [ first foldConditions $
               foldr
                 (\(expr', binder) (conditions, block) ->
-                    bimap (: conditions) ($ block) (mkCondition expr' binder)
+                    bimap (maybe conditions (snoc conditions)) ($ block)
+                      (mkCondition expr' binder)
                 )
                 ([], Go.return (valueToGo context expr))
                 (zip exprs binders)
@@ -310,15 +312,25 @@ caseToGo context ann exprs caseAlternatives =
   mkCondition
     :: CoreFn.Expr CoreFn.Ann
     -> CoreFn.Binder CoreFn.Ann
-    -> (Go.Condition, Go.Block -> Go.Block)
+    -> (Maybe Go.Condition, Go.Block -> Go.Block)
   mkCondition expr = \case
-    CoreFn.ConstructorBinder _ann _typeName ctorName _binders ->
-      ( Go.notNil $ Go.StructAccessorExpr
+    CoreFn.ConstructorBinder _ann typeName ctorName _binders ->
+      --let (_, _) = mkCondition
+      ( Just . Go.notNil $ Go.StructAccessorExpr
           undefined
-          (valueToGo context expr)
+          (valueToGo context
+             (injectAnnType (Types.TypeConstructor typeName) <$> expr)
+          )
           (constructorNameProperty $ Names.disqualify ctorName)
       , id
+      --, Go.AssignStmnt (Go.LocalIdent "foo") Go.emptyStructLiteral
       )
+
+    --CoreFn.VarBinder _ann _ident ->
+    --  ( Nothing
+    --  ,
+    --  )
+    --  undefined
 
       --error (show ann' <> show typeName <> show ctorName <> show binders)
     binder ->
@@ -427,7 +439,7 @@ typeToGo context = \case
   Types.TypeApp (Prim "Record") _ ->
     Go.objectType
 
-  (unTypeApp -> Types.TypeConstructor typeName : _) ->
+  (head . unTypeApp -> Types.TypeConstructor typeName) ->
     Go.NamedType (qualifiedIdentToGo context (unTypeName <$> typeName))
 
   -- XXX
@@ -505,6 +517,11 @@ unIdent Names.UnusedIdent              = "unused"
 
 annType :: CoreFn.Ann -> Maybe Types.Type
 annType (_, _, mbType, _) = mbType
+
+
+injectAnnType :: Types.Type -> CoreFn.Ann -> CoreFn.Ann
+injectAnnType t (sourceSpan, comments, _, mbMeta) =
+  (sourceSpan, comments, Just t, mbMeta)
 
 
 unTypeApp :: Types.Type -> [Types.Type]
