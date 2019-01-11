@@ -27,7 +27,6 @@ module Language.PureScript.CodeGen.Go.AST
   , emptyStructType
   , return
   , panic
-  , mapBlock
   , true
   , ifElse
   , false
@@ -40,6 +39,7 @@ module Language.PureScript.CodeGen.Go.AST
   ) where
 
 import Prelude.Compat hiding (return, and)
+import Debug.Trace (traceShowId)
 
 import qualified Language.PureScript.Names as PS
 import qualified Data.Text as Text
@@ -57,7 +57,7 @@ data File = File
   }
 
 
-newtype Package = Package { unPackage :: Text } deriving (Show, Eq)
+newtype Package = Package { unPackage :: Text } deriving (Show, Eq, Ord)
 
 
 -- | Control.Monad -> package Control_Monad
@@ -156,7 +156,7 @@ mapBlock f = \case
     AssignStmnt ident (f expr) (mapBlock f block)
 
   IfElseStmnt expr block block' ->
-    IfElseStmnt (f expr) (mapBlock f block) (mapBlock f block')
+    IfElseStmnt expr (mapBlock f block) (mapBlock f block')
 
   block@PanicStmnt{} ->
     block
@@ -170,9 +170,10 @@ getBlockType = \case
   AssignStmnt _ _ block ->
     getBlockType block
 
-  IfElseStmnt _ block _block ->
-    -- Assuming both blocks have the same type
-    getBlockType block
+  IfElseStmnt _ yes no ->
+    let yesType = traceShowId $ getBlockType yes
+        noType  = traceShowId $ getBlockType no
+    in  if yesType == noType then yesType else undefined
 
   PanicStmnt panicType _ ->
     PanicType panicType
@@ -184,15 +185,15 @@ getBlockType = \case
 data Expr
   = LiteralExpr Literal
   | BooleanOpExpr BooleanOp
-  | AbsExpr Field Type Block        -- ^ function abstraction: func(foo int) int { ... }
-  | VarExpr Type Ident              -- ^ foo
-  | AppExpr Type Expr Expr          -- ^ function application: foo(bar)
-  | BlockExpr Block                 -- ^ (func() int { ...})()
-  | TypeAssertExpr Type Expr        -- ^ foo.(int)
-  | ReferenceExpr Expr              -- ^ &foo
-  | DereferenceExpr Expr            -- ^ *foo
-  | StructAccessorExpr Expr Ident   -- ^ foo.bar
-  | NilExpr Type                    -- ^ nil
+  | AbsExpr Field Type Block       -- ^ function abstraction: func(foo int) int { ... }
+  | VarExpr Type Ident             -- ^ foo
+  | AppExpr Expr Expr              -- ^ function application: foo(bar)
+  | BlockExpr Block                -- ^ (func() int { ...})()
+  | TypeAssertExpr Type Expr       -- ^ foo.(int)
+  | ReferenceExpr Expr             -- ^ &foo
+  | DereferenceExpr Expr           -- ^ *foo
+  | StructAccessorExpr Expr Ident  -- ^ foo.bar
+  | NilExpr Type                   -- ^ nil
 
   -- XXX
   | TodoExpr String
@@ -263,13 +264,17 @@ getExprType = \case
   DereferenceExpr expr       -> getExprType expr
   NilExpr t                  -> NilType t
 
-  -- NOTE: Returning the _actual_ type rather than the type we want
-  AppExpr _ (getExprType -> FuncType _ returnType) _ -> returnType
-  AppExpr{} -> undefined  -- shouldn't happen
+  AppExpr lhs _ ->
+    case getExprType lhs of
+      FuncType _ returnType -> returnType
+      --         ^^^^^^^^^^
+      -- NOTE: Returning the _actual_ type rather than the type we _want_
+      other -> error ("bad App type: " <> show other)
 
-  StructAccessorExpr (getExprType -> StructType fields) ident ->
-    maybe undefined id (lookup ident fields)
-  StructAccessorExpr{} -> undefined  -- shouldn't happen
+  StructAccessorExpr expr ident ->
+    case getExprType expr of
+      StructType fields -> maybe (error $ show ident <> show fields) id (lookup ident fields)
+      other -> error ("bad struct type: " <> show other)
 
   -- XXX
   TodoExpr _ -> EmptyInterfaceType
@@ -288,57 +293,79 @@ getLiteralType = \case
   NamedStructLiteral ident _     -> NamedType ident
 
 
-typeAssert :: Expr -> Expr
-typeAssert expr = case expr of
+typeAssert :: Type -> Expr -> Expr
+typeAssert EmptyInterfaceType expr = expr
+--         ^ NOTE: Can't assert non-interface types
+typeAssert want expr = case expr of
   LiteralExpr{}             -> expr
   TypeAssertExpr{}          -> expr
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
-  StructAccessorExpr{}      -> expr
   NilExpr{}                 -> expr
-  VarExpr{}                 -> expr
 
-  BlockExpr block -> BlockExpr (mapBlock typeAssert block)
+  VarExpr varType _ ->
+    case varType of
+      EmptyInterfaceType ->
+        TypeAssertExpr want expr
+      _ ->
+        expr
+
+  StructAccessorExpr{} ->
+    case getExprType expr of
+      EmptyInterfaceType ->
+        TypeAssertExpr want expr
+      _ ->
+        expr
+
+  BlockExpr (IfElseStmnt condition yes no) ->
+    BlockExpr $
+      IfElseStmnt
+        (typeAssert (BasicType BoolType) condition)
+        (mapBlock (typeAssert want) yes)
+        (mapBlock (typeAssert want) no)
+
+  BlockExpr block ->
+    BlockExpr (mapBlock (typeAssert want) block)
 
   AbsExpr param result body ->
-    case getBlockType body of
-      EmptyInterfaceType
-        | result /= EmptyInterfaceType ->
-            AbsExpr param result (mapBlock (TypeAssertExpr result) body)
-        | otherwise -> expr
-      _ -> expr
+    AbsExpr param result (mapBlock (typeAssert result) body)
 
-  AppExpr want lhs rhs ->
+  AppExpr lhs rhs ->
     case getExprType lhs of
-      FuncType _ EmptyInterfaceType
-        | want /= EmptyInterfaceType ->
-            TypeAssertExpr want (AppExpr want (typeAssert lhs) (typeAssert rhs))
+      FuncType _ EmptyInterfaceType ->
+        TypeAssertExpr want (AppExpr (typeAssert want lhs) (typeAssert want rhs))
       _ ->
-        AppExpr want (typeAssert lhs) (typeAssert rhs)
+        AppExpr (typeAssert want lhs) (typeAssert want rhs)
 
   BooleanOpExpr op ->
     BooleanOpExpr $ case op of
-      AndOp   lhs rhs -> uncurry AndOp (typeAssertBinOp lhs rhs)
-      EqOp    lhs rhs -> uncurry EqOp  (typeAssertBinOp lhs rhs)
-      NEqOp lhs rhs   -> uncurry NEqOp (typeAssertBinOp lhs rhs)
+      AndOp lhs rhs ->
+        AndOp
+          (typeAssert (BasicType BoolType) lhs)
+          (typeAssert (BasicType BoolType) rhs)
+
+      EqOp lhs rhs ->
+        uncurry NEqOp (typeAssertBinOp lhs rhs)
+
+      NEqOp lhs rhs ->
+        uncurry EqOp (typeAssertBinOp lhs rhs)
 
   -- XXX
   TodoExpr{} -> expr
-  where
-  typeAssertBinOp :: Expr -> Expr -> (Expr, Expr)
-  typeAssertBinOp lhs rhs =
-    case (getExprType lhs, getExprType rhs) of
-      (EmptyInterfaceType, EmptyInterfaceType) -> (lhs, rhs)
-      (otherType         , EmptyInterfaceType) -> (lhs, TypeAssertExpr otherType rhs)
-      (EmptyInterfaceType, otherType         ) -> (TypeAssertExpr otherType lhs, rhs)
-      (_                 , _                 ) -> (lhs, rhs)
 
+
+typeAssertBinOp :: Expr -> Expr -> (Expr, Expr)
+typeAssertBinOp lhs rhs =
+  case (getExprType lhs, getExprType rhs) of
+    (EmptyInterfaceType, EmptyInterfaceType) -> (lhs, rhs)
+    (otherType         , EmptyInterfaceType) -> (lhs, TypeAssertExpr otherType rhs)
+    (EmptyInterfaceType, otherType         ) -> (TypeAssertExpr otherType lhs, rhs)
+    (_                 , _                 ) -> (lhs, rhs)
 
 
 letExpr :: Ident -> Expr -> Expr -> Expr
 letExpr ident lhs rhs =
-  AppExpr (getExprType rhs)
-    (AbsExpr (ident, getExprType lhs) (getExprType rhs) (return rhs)) lhs
+  AppExpr (AbsExpr (ident, getExprType lhs) (getExprType rhs) (return rhs)) lhs
 
 
 -- | Go "object" (kinda)
@@ -374,8 +401,8 @@ substituteVar ident sub = go
     AbsExpr field t block ->
       AbsExpr field t (mapBlock go block)
 
-    AppExpr t lhs rhs ->
-      AppExpr t (go lhs) (go rhs)
+    AppExpr lhs rhs ->
+      AppExpr (go lhs) (go rhs)
 
     BlockExpr block ->
       BlockExpr (mapBlock go block)
@@ -420,13 +447,13 @@ data Ident
   = VisibleIdent Visibility Text -- ^ Top level binding, struct field
   | ImportedIdent Package Text   -- ^ fmt.Sprintf
   | LocalIdent Text              -- ^ foo
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 
 data Visibility
   = Public    -- ^ Public
   | Private   -- ^ private
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 
 mapIdent :: (Text -> Text) -> Ident -> Ident

@@ -91,7 +91,7 @@ printGoExpr = \case
   Go.AbsExpr param result body ->
     printGoFunc Nothing param result body
 
-  Go.AppExpr _ lhs rhs ->
+  Go.AppExpr lhs rhs ->
     case lhs of
       Go.AbsExpr{} ->
         "(" <> printGoExpr lhs <> ")(" <> printGoExpr rhs <> ")"

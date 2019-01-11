@@ -80,8 +80,8 @@ optimizeExpr = \case
   Go.VarExpr t ident ->
     Go.VarExpr t ident
 
-  Go.AppExpr t lhs rhs ->
-    Go.AppExpr t (optimizeExpr lhs) (optimizeExpr rhs)
+  Go.AppExpr lhs rhs ->
+    Go.AppExpr (optimizeExpr lhs) (optimizeExpr rhs)
 
   Go.BlockExpr block ->
     Go.BlockExpr (optimizeBlock block)
@@ -129,4 +129,4 @@ isTrue = \case
 
 pattern LetExpr :: Go.Ident -> Go.Expr -> Go.Block -> Go.Expr
 pattern LetExpr ident lhs rhs <-
-  Go.AppExpr t (Go.AbsExpr (ident, _) ((==t) -> True) rhs) lhs
+  Go.AppExpr (Go.AbsExpr (ident, _) _ rhs) lhs
