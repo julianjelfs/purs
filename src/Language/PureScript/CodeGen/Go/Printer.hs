@@ -113,7 +113,7 @@ printGoExpr = \case
   Go.DereferenceExpr expr ->
     "*" <> printGoExpr expr
 
-  Go.StructAccessorExpr _ _ expr ident ->
+  Go.StructAccessorExpr expr ident ->
     printGoExpr expr <> "." <> printGoIdent ident
 
   Go.NilExpr _ ->
@@ -215,7 +215,7 @@ printGoBooleanOp = \case
   Go.EqOp lhs rhs ->
     printGoExpr lhs <> " == " <> printGoExpr rhs
 
-  Go.NotEqOp lhs rhs ->
+  Go.NEqOp lhs rhs ->
     printGoExpr lhs <> " != " <> printGoExpr rhs
 
 

@@ -4,12 +4,8 @@
 module Language.PureScript.CodeGen.Go.AST
   ( File(..)
   , Package
-  , unPackage
   , Import(..)
   , Decl(..)
-  , packageFromModuleName
-
-  -- * Expressions
   , Expr(..)
   , BooleanOp(..)
   , Block(..)
@@ -20,6 +16,8 @@ module Language.PureScript.CodeGen.Go.AST
   , Visibility(..)
   , KeyValue
   , Field
+  , unPackage
+  , packageFromModuleName
   , getExprType
   , getBlockType
   , typeAssert
@@ -186,15 +184,15 @@ getBlockType = \case
 data Expr
   = LiteralExpr Literal
   | BooleanOpExpr BooleanOp
-  | AbsExpr Field Type Block                -- ^ function abstraction: func(foo int) int { ... }
-  | VarExpr Type Ident                      -- ^ foo
-  | AppExpr Type Expr Expr                  -- ^ function application: foo(bar)
-  | BlockExpr Block                         -- ^ (func() int { ...})()
-  | TypeAssertExpr Type Expr                -- ^ foo.(int)
-  | ReferenceExpr Expr                      -- ^ &foo
-  | DereferenceExpr Expr                    -- ^ *foo
-  | StructAccessorExpr Type Type Expr Ident -- ^ foo.bar
-  | NilExpr Type                            -- ^ nil
+  | AbsExpr Field Type Block        -- ^ function abstraction: func(foo int) int { ... }
+  | VarExpr Type Ident              -- ^ foo
+  | AppExpr Type Expr Expr          -- ^ function application: foo(bar)
+  | BlockExpr Block                 -- ^ (func() int { ...})()
+  | TypeAssertExpr Type Expr        -- ^ foo.(int)
+  | ReferenceExpr Expr              -- ^ &foo
+  | DereferenceExpr Expr            -- ^ *foo
+  | StructAccessorExpr Expr Ident   -- ^ foo.bar
+  | NilExpr Type                    -- ^ nil
 
   -- XXX
   | TodoExpr String
@@ -204,7 +202,7 @@ data Expr
 data BooleanOp
   = AndOp   Expr Expr
   | EqOp    Expr Expr
-  | NotEqOp Expr Expr
+  | NEqOp Expr Expr
   deriving (Show, Eq)
 
 
@@ -229,7 +227,7 @@ eq = (BooleanOpExpr .) . EqOp
 
 
 notNil :: Expr -> Expr
-notNil expr = BooleanOpExpr (expr `NotEqOp` NilExpr (getExprType expr))
+notNil expr = BooleanOpExpr (expr `NEqOp` NilExpr (getExprType expr))
 
 
 data Literal
@@ -265,17 +263,13 @@ getExprType = \case
   DereferenceExpr expr       -> getExprType expr
   NilExpr t                  -> NilType t
 
-  -- Return the _actual_ return type rather than
-  -- the type it's _supposed_ to return.
+  -- NOTE: Returning the _actual_ type rather than the type we want
   AppExpr _ (getExprType -> FuncType _ returnType) _ -> returnType
+  AppExpr{} -> undefined  -- shouldn't happen
 
-  -- This next case should be impossible,
-  -- We should always have a function type on the left
-  -- side of an application
-  AppExpr{} -> undefined
-
-  -- Again, returning the actual type rather than the type we want.
-  StructAccessorExpr _ actualType _ _ -> actualType
+  StructAccessorExpr (getExprType -> StructType fields) ident ->
+    maybe undefined id (lookup ident fields)
+  StructAccessorExpr{} -> undefined  -- shouldn't happen
 
   -- XXX
   TodoExpr _ -> EmptyInterfaceType
@@ -283,11 +277,11 @@ getExprType = \case
 
 getLiteralType :: Literal -> Type
 getLiteralType = \case
-  IntLiteral _                   -> BasicType IntType
-  FloatLiteral _                 -> BasicType Float64Type
-  StringLiteral _                -> BasicType StringType
-  CharLiteral _                  -> BasicType RuneType
-  BoolLiteral _                  -> BasicType BoolType
+  IntLiteral{}                   -> BasicType IntType
+  FloatLiteral{}                 -> BasicType Float64Type
+  StringLiteral{}                -> BasicType StringType
+  CharLiteral{}                  -> BasicType RuneType
+  BoolLiteral{}                  -> BasicType BoolType
   SliceLiteral itemType _        -> SliceType itemType
   MapLiteral keyType valueType _ -> MapType keyType valueType
   StructLiteral fields _         -> StructType fields
@@ -297,47 +291,54 @@ getLiteralType = \case
 typeAssert :: Expr -> Expr
 typeAssert expr = case expr of
   LiteralExpr{}             -> expr
-  AbsExpr param result body -> AbsExpr param result (mapBlock typeAssert body)
-  VarExpr{}                 -> expr
   TypeAssertExpr{}          -> expr
-  BlockExpr{}               -> expr -- I don't think this needs asserting?
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
+  StructAccessorExpr{}      -> expr
   NilExpr{}                 -> expr
+  VarExpr{}                 -> expr
+
+  BlockExpr block -> BlockExpr (mapBlock typeAssert block)
+
+  AbsExpr param result body ->
+    case getBlockType body of
+      EmptyInterfaceType
+        | result /= EmptyInterfaceType ->
+            AbsExpr param result (mapBlock (TypeAssertExpr result) body)
+        | otherwise -> expr
+      _ -> expr
 
   AppExpr want lhs rhs ->
     case getExprType lhs of
       FuncType _ EmptyInterfaceType
         | want /= EmptyInterfaceType ->
-            TypeAssertExpr want (AppExpr want lhs (typeAssert rhs))
-            --                                     ^^^^^^^^^^
-            --                             NOTE: should we be recursing here?
+            TypeAssertExpr want (AppExpr want (typeAssert lhs) (typeAssert rhs))
       _ ->
-        AppExpr want lhs (typeAssert rhs)
-
-  StructAccessorExpr want got expr' ident ->
-    case got of
-      EmptyInterfaceType ->
-        TypeAssertExpr want (StructAccessorExpr want got (typeAssert expr') ident)
-      _ ->
-        StructAccessorExpr want got (typeAssert expr') ident
+        AppExpr want (typeAssert lhs) (typeAssert rhs)
 
   BooleanOpExpr op ->
     BooleanOpExpr $ case op of
-      AndOp   lhs rhs -> AndOp   (typeAssert lhs) (typeAssert rhs)
-      EqOp    lhs rhs -> EqOp    (typeAssert lhs) (typeAssert rhs)
-      NotEqOp lhs rhs -> NotEqOp (typeAssert lhs) (typeAssert rhs)
+      AndOp   lhs rhs -> uncurry AndOp (typeAssertBinOp lhs rhs)
+      EqOp    lhs rhs -> uncurry EqOp  (typeAssertBinOp lhs rhs)
+      NEqOp lhs rhs   -> uncurry NEqOp (typeAssertBinOp lhs rhs)
 
   -- XXX
   TodoExpr{} -> expr
+  where
+  typeAssertBinOp :: Expr -> Expr -> (Expr, Expr)
+  typeAssertBinOp lhs rhs =
+    case (getExprType lhs, getExprType rhs) of
+      (EmptyInterfaceType, EmptyInterfaceType) -> (lhs, rhs)
+      (otherType         , EmptyInterfaceType) -> (lhs, TypeAssertExpr otherType rhs)
+      (EmptyInterfaceType, otherType         ) -> (TypeAssertExpr otherType lhs, rhs)
+      (_                 , _                 ) -> (lhs, rhs)
+
 
 
 letExpr :: Ident -> Expr -> Expr -> Expr
 letExpr ident lhs rhs =
-  AppExpr
-    (getExprType rhs)
-    (AbsExpr (ident, getExprType lhs) (getExprType rhs) (return rhs))
-    lhs
+  AppExpr (getExprType rhs)
+    (AbsExpr (ident, getExprType lhs) (getExprType rhs) (return rhs)) lhs
 
 
 -- | Go "object" (kinda)
@@ -373,8 +374,8 @@ substituteVar ident sub = go
     AbsExpr field t block ->
       AbsExpr field t (mapBlock go block)
 
-    AppExpr t expr' expr'' ->
-      AppExpr t (go expr') (go expr'')
+    AppExpr t lhs rhs ->
+      AppExpr t (go lhs) (go rhs)
 
     BlockExpr block ->
       BlockExpr (mapBlock go block)
@@ -388,8 +389,8 @@ substituteVar ident sub = go
     DereferenceExpr expr' ->
       DereferenceExpr (go expr')
 
-    StructAccessorExpr t t' expr' ident' ->
-      StructAccessorExpr t t' (go expr') ident'
+    StructAccessorExpr expr' ident' ->
+      StructAccessorExpr (go expr') ident'
 
     NilExpr t ->
       NilExpr t

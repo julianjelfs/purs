@@ -32,7 +32,7 @@ optimizeDecl = \case
 
   Go.VarDecl ident t expr
     -- Declare with const where possible
-    | canConst t -> Go.ConstDecl ident t (optimizeExpr expr)
+    | canConst expr -> Go.ConstDecl ident t (optimizeExpr expr)
     | otherwise -> Go.VarDecl ident t (optimizeExpr expr)
 
   Go.ConstDecl ident t expr ->
@@ -95,8 +95,8 @@ optimizeExpr = \case
   Go.DereferenceExpr expr ->
     Go.DereferenceExpr (optimizeExpr expr)
 
-  Go.StructAccessorExpr t t' expr ident ->
-    Go.StructAccessorExpr t t' (optimizeExpr expr) ident
+  Go.StructAccessorExpr expr ident ->
+    Go.StructAccessorExpr (optimizeExpr expr) ident
 
   Go.NilExpr t ->
     Go.NilExpr t
@@ -106,11 +106,15 @@ optimizeExpr = \case
     Go.TodoExpr x
 
 
--- | Is the given type suitable for a top-level const declaration?
+-- | Is the given expression suitable for a top-level const declaration?
 --
-canConst :: Go.Type -> Bool
+canConst :: Go.Expr -> Bool
 canConst = \case
-  Go.BasicType _ -> True
+  Go.LiteralExpr (Go.IntLiteral _)    -> True
+  Go.LiteralExpr (Go.FloatLiteral _)  -> True
+  Go.LiteralExpr (Go.StringLiteral _) -> True
+  Go.LiteralExpr (Go.CharLiteral _)   -> True
+  Go.LiteralExpr (Go.BoolLiteral _)   -> True
   _ -> False
 
 
@@ -125,7 +129,4 @@ isTrue = \case
 
 pattern LetExpr :: Go.Ident -> Go.Expr -> Go.Block -> Go.Expr
 pattern LetExpr ident lhs rhs <-
-  Go.AppExpr
-    t
-    (Go.AbsExpr (ident, _) ((==t) -> True) rhs)
-    lhs
+  Go.AppExpr t (Go.AbsExpr (ident, _) ((==t) -> True) rhs) lhs

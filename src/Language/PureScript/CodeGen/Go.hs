@@ -254,17 +254,14 @@ valueToGo context = Go.typeAssert . \case
   CoreFn.Var ann name ->
     case ann of
       -- TODO: Look at the CoreFn.Meta and case accordingly.
-
       (_, _, Just t, _) ->
         Go.VarExpr
           (typeToGo context t)
           (qualifiedIdentToGo context name)
 
-      -- XXX
+      -- TODO
       (_, _, Nothing, _) ->
-        Go.VarExpr
-          Go.EmptyInterfaceType -- TODO: what to do here?
-          (qualifiedIdentToGo context name)
+        undefined
 
   CoreFn.Case ann exprs cases ->
     caseToGo context ann exprs cases
@@ -276,6 +273,7 @@ valueToGo context = Go.typeAssert . \case
   expr -> Go.TodoExpr (show expr)
 
 
+-- | TODO: Need to magic some type information here.
 caseToGo
   :: Context
   -> CoreFn.Ann
@@ -332,20 +330,12 @@ binderToGo context expr = \case
     case ann of
       (_, _, _, Just (CoreFn.IsConstructor _ idents')) ->
         let idents = localIdent <$> idents'
-            construct = Go.StructAccessorExpr
-                (Go.StructType ((,Go.EmptyInterfaceType) <$> idents))
-                (Go.StructType ((,Go.EmptyInterfaceType) <$> idents))
-                expr
+            construct = Go.StructAccessorExpr expr
                 (constructorNameProperty (Names.disqualify ctorName))
         in
         ([Go.notNil construct], []) <>
             zipFoldWith
-              ( binderToGo context
-              . Go.StructAccessorExpr
-                  (Go.BasicType Go.IntType) -- FIXME: Where does this type come from?
-                  Go.EmptyInterfaceType
-                  construct
-              )
+              (binderToGo context . Go.StructAccessorExpr construct)
               idents
               binders
 
