@@ -14,7 +14,6 @@ module Language.PureScript.CodeGen.Go.AST
   , BooleanOp(..)
   , Block(..)
   , Literal(..)
-  , Condition
   , KeyValue
   , Field
   , getExprType
@@ -28,6 +27,7 @@ module Language.PureScript.CodeGen.Go.AST
   , panic
   , mapBlock
   , and
+  , eq
   , notNil
   , letExpr
 
@@ -100,7 +100,7 @@ data Type
   | NamedType Ident
   | PointerType Type
   | PanicType Type
-  | NilType
+  | NilType Type
 
   -- XXX
   | UnknownType String
@@ -135,7 +135,7 @@ data BasicType
 data Block
   = ReturnStmnt Expr
   | AssignStmnt Ident Expr Block
-  | IfElseStmnt Condition Block Block
+  | IfElseStmnt Expr Block Block
   | PanicStmnt Type Text
   deriving (Show)
 
@@ -193,7 +193,7 @@ data Expr
   | ReferenceExpr Expr                 -- ^ &foo
   | DereferenceExpr Expr               -- ^ *foo
   | StructAccessorExpr Type Expr Ident -- ^ foo.bar
-  | NilExpr                            -- ^ nil
+  | NilExpr Type                       -- ^ nil
 
   -- XXX
   | TodoExpr String
@@ -211,8 +211,12 @@ and :: Expr -> Expr -> Expr
 and = (BooleanOpExpr .) . AndOp
 
 
+eq :: Expr -> Expr -> Expr
+eq = (BooleanOpExpr .) . EqOp
+
+
 notNil :: Expr -> Expr
-notNil = BooleanOpExpr . flip NotEqOp NilExpr
+notNil expr = BooleanOpExpr (expr `NotEqOp` NilExpr (getExprType expr))
 
 
 data Literal
@@ -226,9 +230,6 @@ data Literal
   | StructLiteral [Field] [KeyValue Ident]
   | NamedStructLiteral Ident [KeyValue Ident]
   deriving (Show)
-
-
-type Condition = Expr
 
 
 emptyStructLiteral :: Expr
@@ -250,7 +251,7 @@ getExprType = \case
   ReferenceExpr expr         -> PointerType (getExprType expr)
   DereferenceExpr expr       -> getExprType expr
   StructAccessorExpr t _ _   -> t
-  NilExpr                    -> NilType
+  NilExpr t                  -> NilType t
 
   -- Return the _actual_ return type rather than
   -- the type it's _supposed_ to return.
@@ -289,7 +290,7 @@ typeAssert expr = case expr of
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
   StructAccessorExpr{}      -> expr
-  NilExpr                   -> expr
+  NilExpr{}                 -> expr
 
   -- NOTE: stopping at the outermost App rather than recursing
   AppExpr want lhs rhs ->

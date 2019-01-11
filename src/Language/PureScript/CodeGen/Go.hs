@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-unused-imports   #-}
-{-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 module Language.PureScript.CodeGen.Go
   ( module Plumbing
   , moduleToGo
@@ -20,12 +18,11 @@ import qualified Language.PureScript.AST.Literals as Literals
 import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Foldable (fold)
 import Data.Text (Text)
 import Data.Function ((&))
-import Data.Foldable (foldl')
 import Data.Maybe (mapMaybe)
-import Data.Bifunctor (first, bimap)
-import Data.Functor ((<&>))
+import Data.Bifunctor (bimap)
 import Control.Monad.Reader (MonadReader)
 import Control.Monad.Supply.Class (MonadSupply)
 import Language.PureScript.Errors (MultipleErrors)
@@ -275,99 +272,54 @@ valueToGo context = Go.typeAssert . \case
   expr -> Go.TodoExpr (show expr)
 
 
--- | TODO: Refactor this
 caseToGo
   :: Context
   -> CoreFn.Ann
   -> [CoreFn.Expr CoreFn.Ann]
   -> [CoreFn.CaseAlternative CoreFn.Ann]
   -> Go.Expr
-caseToGo _context _ann _exprs _caseAlternatives = undefined
-  --Go.BlockExpr (foldr (uncurry Go.IfElseStmnt) failBlock conditionalBlocks)
-  --where
-  --conditionalBlocks :: [(Go.Expr, Go.Block)]
-  --conditionalBlocks = concatMap mkBlocks caseAlternatives
-  --  where
-  --  mkBlocks :: CoreFn.CaseAlternative CoreFn.Ann -> [(Go.Expr, Go.Block)]
-  --  --mkBlocks (CoreFn.CaseAlternative [] _) = undefined
-  --  mkBlocks (CoreFn.CaseAlternative binders result) =
-  --    case result of
-  --      Left guards ->
-  --        -- FIXME: guards should be nested ifs (that's what the js does)
-  --        guards <&> \(guard, expr) ->
-  --          first (foldConditions . (`snoc` valueToGo context guard)) $
-  --            foldr
-  --              (\(expr', binder) (conditions, block) ->
-  --                  bimap (maybe conditions (snoc conditions)) ($ block)
-  --                    (mkCondition expr' binder)
-  --              )
-  --              ([], Go.return (valueToGo context expr))
-  --              (zip exprs binders)
+caseToGo context ann coreExprs =
+  Go.BlockExpr . go (valueToGo context <$> coreExprs)
+  where
+  go :: [Go.Expr] -> [CoreFn.CaseAlternative CoreFn.Ann] -> Go.Block
+  go _ [] =
+    Go.panic (maybe undefined (typeToGo context) (annType ann))
+      "Failed pattern match"
 
-  --      Right expr ->
-  --        [ first foldConditions $
-  --            foldr
-  --              (\(expr', binder) (conditions, block) ->
-  --                  bimap (maybe conditions (snoc conditions)) ($ block)
-  --                    (mkCondition expr' binder)
-  --              )
-  --              ([], Go.return (valueToGo context expr))
-  --              (zip exprs binders)
-  --        ]
+  go exprs (CoreFn.CaseAlternative binders result : rest) =
+    case fold (zipWith (binderToGo context) exprs binders) of
+      (bools, []) ->
+        Go.IfElseStmnt (foldBools bools) (undefined result) (go exprs rest)
+      _ ->
+        undefined
 
-  --mkCondition
-  --  :: CoreFn.Expr CoreFn.Ann
-  --  -> CoreFn.Binder CoreFn.Ann
-  --  -> (Maybe Go.Condition, Go.Block -> Go.Block)
-  --mkCondition expr = \case
-  --  CoreFn.ConstructorBinder (SumType _values) typeName ctorName binders ->
-  --    ( Just . Go.notNil . seq ann $ Go.StructAccessorExpr
-  --        undefined
-  --        (valueToGo context
-  --           (injectAnnType (Types.TypeConstructor typeName) <$> expr)
-  --        )
-  --        (constructorNameProperty $ Names.disqualify ctorName)
-  --    , error (show binders)
-  --    )
-
-  --  --CoreFn.VarBinder _ann _ident ->
-  --  --  ( Nothing
-  --  --  ,
-  --  --  )
-  --  --  undefined
-
-  --  --error (show ann' <> show typeName <> show ctorName <> show binders)
-  --  binder ->
-  --    error (show binder)
-
-  --foldConditions :: [Go.Condition] -> Go.Condition
-  --foldConditions [] = undefined -- Go.LiteralExpr (Go.BoolExpr True)
-  --foldConditions [condition] = condition
-  --foldConditions (condition : conditions) = foldl' Go.and condition conditions
-
-  ---- TODO
-  --failBlock :: Go.Block
-  --failBlock =
-  --  Go.panic (maybe undefined (typeToGo context) (annType ann))
-  --    "Failed pattern match"
+  foldBools :: [Go.Expr] -> Go.Expr
+  foldBools []  = undefined
+  foldBools [b] = b
+  foldBools (b : bs) = b `Go.and` foldBools bs
 
 
--- | Is this the right way to do it?
+-- | Given an expression and a binder, return tests and assigments?
 --
 binderToGo
-  :: Text
-  -> CoreFn.Expr CoreFn.Ann
-  -> CoreFn.Binder CoreFn.Ann
+  :: Context
   -> Go.Expr
-binderToGo _valueName _base = \case
+  -> CoreFn.Binder CoreFn.Ann
+  -> ([Go.Expr], [Go.Expr])
+binderToGo _context expr = \case
   CoreFn.NullBinder{} ->
     undefined
 
   CoreFn.VarBinder _ _ident ->
     undefined
+    --Go.AssignStmnt (localIdent ident) (uncurry Go.VarExpr var) block
 
-  CoreFn.LiteralBinder _ann _literal ->
-    undefined
+  CoreFn.LiteralBinder _ann literal ->
+    case literal of
+      Literals.NumericLiteral (Left integer) ->
+        ([expr `Go.eq` Go.LiteralExpr (Go.IntLiteral integer)], [])
+      _ ->
+        undefined
 
   _ ->
     undefined
@@ -380,6 +332,7 @@ letToGo    -- let it go, let it gooo
   -> Go.Expr
 letToGo context binds expr = go (flattenBinds binds)
   where
+  go :: [Bind] -> Go.Expr
   go [] = valueToGo context expr
   go (Bind _ ident value : rest) =
     Go.letExpr (localIdent ident) (valueToGo context value) (go rest)
@@ -534,11 +487,6 @@ annType :: CoreFn.Ann -> Maybe Types.Type
 annType (_, _, mbType, _) = mbType
 
 
-injectAnnType :: Types.Type -> CoreFn.Ann -> CoreFn.Ann
-injectAnnType t (sourceSpan, comments, _, mbMeta) =
-  (sourceSpan, comments, Just t, mbMeta)
-
-
 unTypeApp :: Types.Type -> [Types.Type]
 unTypeApp (Types.TypeApp a b) = unTypeApp a <> unTypeApp b
 unTypeApp t = [t]
@@ -554,10 +502,6 @@ showT :: Show a => a -> Text
 showT = Text.pack . show
 
 
-snoc :: [a] -> a -> [a]
-snoc as a = as <> [a]
-
-
 -- PATTERN SYNONYMS
 
 
@@ -571,6 +515,15 @@ pattern FunctionApp lhs rhs <-
   Types.TypeApp (Types.TypeApp (Prim "Function") lhs) rhs
 
 
-pattern SumType :: [Names.Ident] -> CoreFn.Ann
-pattern SumType values <-
-  (_, _, _, Just (CoreFn.IsConstructor CoreFn.SumType values))
+--pattern SumType :: [Names.Ident] -> CoreFn.Ann
+--pattern SumType values <-
+--  (_, _, _, Just (CoreFn.IsConstructor CoreFn.SumType values))
+
+
+--injectAnnType :: Types.Type -> CoreFn.Ann -> CoreFn.Ann
+--injectAnnType t (sourceSpan, comments, _, mbMeta) =
+--  (sourceSpan, comments, Just t, mbMeta)
+
+
+--snoc :: [a] -> a -> [a]
+--snoc as a = as <> [a]

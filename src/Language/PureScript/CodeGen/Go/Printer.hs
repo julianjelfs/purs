@@ -116,7 +116,7 @@ printGoExpr = \case
   Go.StructAccessorExpr _ expr ident ->
     printGoExpr expr <> "." <> printGoIdent ident
 
-  Go.NilExpr ->
+  Go.NilExpr _ ->
     "nil"
 
   -- XXX
@@ -199,8 +199,8 @@ printGoType = \case
   Go.PanicType gotype ->
     printGoType gotype
 
-  Go.NilType ->
-    undefined
+  Go.NilType gotype ->
+    printGoType gotype
 
   -- XXX
   Go.UnknownType what ->
