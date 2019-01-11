@@ -14,6 +14,10 @@ module Language.PureScript.CodeGen.Go.AST
   , BooleanOp(..)
   , Block(..)
   , Literal(..)
+  , Type(..)
+  , BasicType(..)
+  , Ident(..)
+  , Visibility(..)
   , KeyValue
   , Field
   , getExprType
@@ -26,18 +30,14 @@ module Language.PureScript.CodeGen.Go.AST
   , return
   , panic
   , mapBlock
+  , true
+  , ifElse
+  , false
   , and
   , eq
   , notNil
   , letExpr
-
-  -- * Types
-  , Type(..)
-  , BasicType(..)
-
-  -- * Identifiers
-  , Ident(..)
-  , Visibility(..)
+  , substituteVar
   , mapIdent
   ) where
 
@@ -86,6 +86,7 @@ data Decl
   | TypeDecl Ident Type
   | VarDecl Ident Type Expr
   | ConstDecl Ident Type Expr
+  deriving (Eq)
 
 
 -- | Go type.
@@ -137,7 +138,7 @@ data Block
   | AssignStmnt Ident Expr Block
   | IfElseStmnt Expr Block Block
   | PanicStmnt Type Text
-  deriving (Show)
+  deriving (Show, Eq)
 
 
 return :: Expr -> Block
@@ -197,14 +198,26 @@ data Expr
 
   -- XXX
   | TodoExpr String
-  deriving (Show)
+  deriving (Show, Eq)
 
 
 data BooleanOp
   = AndOp   Expr Expr
   | EqOp    Expr Expr
   | NotEqOp Expr Expr
-  deriving (Show)
+  deriving (Show, Eq)
+
+
+true :: Expr
+true = LiteralExpr (BoolLiteral True)
+
+
+false :: Expr
+false = LiteralExpr (BoolLiteral False)
+
+
+ifElse :: Expr -> Block -> Block -> Block
+ifElse = IfElseStmnt
 
 
 and :: Expr -> Expr -> Expr
@@ -229,7 +242,7 @@ data Literal
   | MapLiteral Type Type [KeyValue Expr]
   | StructLiteral [Field] [KeyValue Ident]
   | NamedStructLiteral Ident [KeyValue Ident]
-  deriving (Show)
+  deriving (Show, Eq)
 
 
 emptyStructLiteral :: Expr
@@ -326,6 +339,50 @@ objectLiteral =
 
 objectType :: Type
 objectType = MapType (BasicType StringType) EmptyInterfaceType
+
+
+substituteVar :: Ident -> Expr -> Expr -> Expr
+substituteVar ident sub = go
+  where
+  go :: Expr -> Expr
+  go = \case
+    VarExpr t ident'
+      | ident == ident' -> sub
+      | otherwise -> VarExpr t ident'
+
+    LiteralExpr literal ->
+      LiteralExpr literal -- TODO
+
+    BooleanOpExpr op ->
+      BooleanOpExpr op -- TODO
+
+    AbsExpr field t block ->
+      AbsExpr field t (mapBlock go block)
+
+    AppExpr t expr' expr'' ->
+      AppExpr t (go expr') (go expr'')
+
+    BlockExpr block ->
+      BlockExpr (mapBlock go block)
+
+    TypeAssertExpr t expr' ->
+      TypeAssertExpr t (go expr')
+
+    ReferenceExpr expr' ->
+      ReferenceExpr (go expr')
+
+    DereferenceExpr expr' ->
+      DereferenceExpr (go expr')
+
+    StructAccessorExpr t expr' ident' ->
+      StructAccessorExpr t (go expr') ident'
+
+    NilExpr t ->
+      NilExpr t
+
+    -- XXX
+    TodoExpr x ->
+      TodoExpr x
 
 
 -- | key: value

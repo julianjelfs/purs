@@ -18,7 +18,6 @@ import qualified Language.PureScript.AST.Literals as Literals
 import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Foldable (fold)
 import Data.Text (Text)
 import Data.Function ((&))
 import Data.Maybe (mapMaybe)
@@ -260,7 +259,11 @@ valueToGo context = Go.typeAssert . \case
           (typeToGo context t)
           (qualifiedIdentToGo context name)
 
-      _ -> undefined
+      -- XXX
+      (_, _, Nothing, _) ->
+        Go.VarExpr
+          Go.EmptyInterfaceType -- TODO: what to do here?
+          (qualifiedIdentToGo context name)
 
   CoreFn.Case ann exprs cases ->
     caseToGo context ann exprs cases
@@ -287,39 +290,55 @@ caseToGo context ann coreExprs =
       "Failed pattern match"
 
   go exprs (CoreFn.CaseAlternative binders result : rest) =
-    case fold (zipWith (binderToGo context) exprs binders) of
-      (bools, []) ->
-        Go.IfElseStmnt (foldBools bools) (undefined result) (go exprs rest)
-      _ ->
-        undefined
+    let (conds, subs) = foldMap (uncurry $ binderToGo context) (zip exprs binders)
 
-  foldBools :: [Go.Expr] -> Go.Expr
-  foldBools []  = undefined
-  foldBools [b] = b
-  foldBools (b : bs) = b `Go.and` foldBools bs
+        substitute :: Go.Expr -> Go.Expr
+        substitute expr =
+          foldr ($) expr (uncurry Go.substituteVar <$> subs)
+    in
+    case result of
+      Left _ -> undefined
+      Right expr ->
+        Go.ifElse
+          (foldConditions (substitute <$> conds))
+          (Go.return $ substitute (valueToGo context expr))
+          (go exprs rest)
+
+  foldConditions :: [Go.Expr] -> Go.Expr
+  foldConditions [] = Go.true
+  foldConditions [b] = b
+  foldConditions (b : bs) = b `Go.and` foldConditions bs
 
 
--- | Given an expression and a binder, return tests and assigments?
+-- | Returns conditions and substitutions.
 --
 binderToGo
   :: Context
   -> Go.Expr
   -> CoreFn.Binder CoreFn.Ann
-  -> ([Go.Expr], [Go.Expr])
-binderToGo _context expr = \case
+  -> ([Go.Expr], [(Go.Ident, Go.Expr)])
+binderToGo context expr = \case
   CoreFn.NullBinder{} ->
-    undefined
+    mempty
 
-  CoreFn.VarBinder _ _ident ->
-    undefined
-    --Go.AssignStmnt (localIdent ident) (uncurry Go.VarExpr var) block
+  CoreFn.VarBinder _ ident ->
+    ([], [(localIdent ident, expr)])
 
   CoreFn.LiteralBinder _ann literal ->
-    case literal of
-      Literals.NumericLiteral (Left integer) ->
-        ([expr `Go.eq` Go.LiteralExpr (Go.IntLiteral integer)], [])
-      _ ->
-        undefined
+    literalBinderToGo context expr literal
+
+  _ ->
+    undefined
+
+
+literalBinderToGo
+  :: Context
+  -> Go.Expr
+  -> Literals.Literal (CoreFn.Binder CoreFn.Ann)
+  -> ([Go.Expr], [(Go.Ident, Go.Expr)])
+literalBinderToGo _context expr = \case
+  Literals.NumericLiteral (Left integer) ->
+    ([expr `Go.eq` Go.LiteralExpr (Go.IntLiteral integer)], [])
 
   _ ->
     undefined
@@ -487,6 +506,11 @@ annType :: CoreFn.Ann -> Maybe Types.Type
 annType (_, _, mbType, _) = mbType
 
 
+--injectAnnType :: Types.Type -> CoreFn.Ann -> CoreFn.Ann
+--injectAnnType t (sourceSpan, comments, _, mbMeta) =
+--  (sourceSpan, comments, Just t, mbMeta)
+
+
 unTypeApp :: Types.Type -> [Types.Type]
 unTypeApp (Types.TypeApp a b) = unTypeApp a <> unTypeApp b
 unTypeApp t = [t]
@@ -518,12 +542,3 @@ pattern FunctionApp lhs rhs <-
 --pattern SumType :: [Names.Ident] -> CoreFn.Ann
 --pattern SumType values <-
 --  (_, _, _, Just (CoreFn.IsConstructor CoreFn.SumType values))
-
-
---injectAnnType :: Types.Type -> CoreFn.Ann -> CoreFn.Ann
---injectAnnType t (sourceSpan, comments, _, mbMeta) =
---  (sourceSpan, comments, Just t, mbMeta)
-
-
---snoc :: [a] -> a -> [a]
---snoc as a = as <> [a]
