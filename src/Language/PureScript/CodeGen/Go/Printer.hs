@@ -113,7 +113,7 @@ printGoExpr = \case
   Go.DereferenceExpr expr ->
     "*" <> printGoExpr expr
 
-  Go.StructAccessorExpr _ expr ident ->
+  Go.StructAccessorExpr _ _ expr ident ->
     printGoExpr expr <> "." <> printGoIdent ident
 
   Go.NilExpr _ ->

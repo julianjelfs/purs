@@ -95,8 +95,8 @@ optimizeExpr = \case
   Go.DereferenceExpr expr ->
     Go.DereferenceExpr (optimizeExpr expr)
 
-  Go.StructAccessorExpr t expr ident ->
-    Go.StructAccessorExpr t (optimizeExpr expr) ident
+  Go.StructAccessorExpr t t' expr ident ->
+    Go.StructAccessorExpr t t' (optimizeExpr expr) ident
 
   Go.NilExpr t ->
     Go.NilExpr t

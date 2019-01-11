@@ -19,6 +19,7 @@ import Control.Monad.Except (MonadError)
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
+import Data.Foldable (fold)
 import Data.Function ((&))
 import Data.Maybe (mapMaybe)
 import Data.Bifunctor (bimap)
@@ -290,7 +291,7 @@ caseToGo context ann coreExprs =
       "Failed pattern match"
 
   go exprs (CoreFn.CaseAlternative binders result : rest) =
-    let (conds, subs) = foldMap (uncurry $ binderToGo context) (zip exprs binders)
+    let (conds, subs) = zipFoldWith (binderToGo context) exprs binders
 
         substitute :: Go.Expr -> Go.Expr
         substitute expr =
@@ -326,6 +327,30 @@ binderToGo context expr = \case
 
   CoreFn.LiteralBinder _ann literal ->
     literalBinderToGo context expr literal
+
+  CoreFn.ConstructorBinder ann _typeName ctorName binders ->
+    case ann of
+      (_, _, _, Just (CoreFn.IsConstructor _ idents')) ->
+        let idents = localIdent <$> idents'
+            construct = Go.StructAccessorExpr
+                (Go.StructType ((,Go.EmptyInterfaceType) <$> idents))
+                (Go.StructType ((,Go.EmptyInterfaceType) <$> idents))
+                expr
+                (constructorNameProperty (Names.disqualify ctorName))
+        in
+        ([Go.notNil construct], []) <>
+            zipFoldWith
+              ( binderToGo context
+              . Go.StructAccessorExpr
+                  (Go.BasicType Go.IntType) -- FIXME: Where does this type come from?
+                  Go.EmptyInterfaceType
+                  construct
+              )
+              idents
+              binders
+
+      _ ->
+        undefined
 
   _ ->
     undefined
@@ -524,6 +549,10 @@ addDir dir base = Text.pack (dir </> Text.unpack base)
 
 showT :: Show a => a -> Text
 showT = Text.pack . show
+
+
+zipFoldWith :: Monoid c => (a -> b -> c) -> [a] -> [b] -> c
+zipFoldWith f as bs = fold (zipWith f as bs)
 
 
 -- PATTERN SYNONYMS

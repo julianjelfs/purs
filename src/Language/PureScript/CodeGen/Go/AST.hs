@@ -186,15 +186,15 @@ getBlockType = \case
 data Expr
   = LiteralExpr Literal
   | BooleanOpExpr BooleanOp
-  | AbsExpr Field Type Block           -- ^ function abstraction: func(foo int) int { ... }
-  | VarExpr Type Ident                 -- ^ foo
-  | AppExpr Type Expr Expr             -- ^ function application: foo(bar)
-  | BlockExpr Block                    -- ^ (func() int { ...})()
-  | TypeAssertExpr Type Expr           -- ^ foo.(int)
-  | ReferenceExpr Expr                 -- ^ &foo
-  | DereferenceExpr Expr               -- ^ *foo
-  | StructAccessorExpr Type Expr Ident -- ^ foo.bar
-  | NilExpr Type                       -- ^ nil
+  | AbsExpr Field Type Block                -- ^ function abstraction: func(foo int) int { ... }
+  | VarExpr Type Ident                      -- ^ foo
+  | AppExpr Type Expr Expr                  -- ^ function application: foo(bar)
+  | BlockExpr Block                         -- ^ (func() int { ...})()
+  | TypeAssertExpr Type Expr                -- ^ foo.(int)
+  | ReferenceExpr Expr                      -- ^ &foo
+  | DereferenceExpr Expr                    -- ^ *foo
+  | StructAccessorExpr Type Type Expr Ident -- ^ foo.bar
+  | NilExpr Type                            -- ^ nil
 
   -- XXX
   | TodoExpr String
@@ -263,7 +263,6 @@ getExprType = \case
   TypeAssertExpr assertion _ -> assertion
   ReferenceExpr expr         -> PointerType (getExprType expr)
   DereferenceExpr expr       -> getExprType expr
-  StructAccessorExpr t _ _   -> t
   NilExpr t                  -> NilType t
 
   -- Return the _actual_ return type rather than
@@ -274,6 +273,9 @@ getExprType = \case
   -- We should always have a function type on the left
   -- side of an application
   AppExpr{} -> undefined
+
+  -- Again, returning the actual type rather than the type we want.
+  StructAccessorExpr _ actualType _ _ -> actualType
 
   -- XXX
   TodoExpr _ -> EmptyInterfaceType
@@ -295,24 +297,36 @@ getLiteralType = \case
 typeAssert :: Expr -> Expr
 typeAssert expr = case expr of
   LiteralExpr{}             -> expr
-  BooleanOpExpr{}           -> expr
   AbsExpr param result body -> AbsExpr param result (mapBlock typeAssert body)
   VarExpr{}                 -> expr
   TypeAssertExpr{}          -> expr
   BlockExpr{}               -> expr -- I don't think this needs asserting?
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
-  StructAccessorExpr{}      -> expr
   NilExpr{}                 -> expr
 
-  -- NOTE: stopping at the outermost App rather than recursing
   AppExpr want lhs rhs ->
     case getExprType lhs of
       FuncType _ EmptyInterfaceType
         | want /= EmptyInterfaceType ->
             TypeAssertExpr want (AppExpr want lhs (typeAssert rhs))
+            --                                     ^^^^^^^^^^
+            --                             NOTE: should we be recursing here?
       _ ->
         AppExpr want lhs (typeAssert rhs)
+
+  StructAccessorExpr want got expr' ident ->
+    case got of
+      EmptyInterfaceType ->
+        TypeAssertExpr want (StructAccessorExpr want got (typeAssert expr') ident)
+      _ ->
+        StructAccessorExpr want got (typeAssert expr') ident
+
+  BooleanOpExpr op ->
+    BooleanOpExpr $ case op of
+      AndOp   lhs rhs -> AndOp   (typeAssert lhs) (typeAssert rhs)
+      EqOp    lhs rhs -> EqOp    (typeAssert lhs) (typeAssert rhs)
+      NotEqOp lhs rhs -> NotEqOp (typeAssert lhs) (typeAssert rhs)
 
   -- XXX
   TodoExpr{} -> expr
@@ -374,8 +388,8 @@ substituteVar ident sub = go
     DereferenceExpr expr' ->
       DereferenceExpr (go expr')
 
-    StructAccessorExpr t expr' ident' ->
-      StructAccessorExpr t (go expr') ident'
+    StructAccessorExpr t t' expr' ident' ->
+      StructAccessorExpr t t' (go expr') ident'
 
     NilExpr t ->
       NilExpr t
