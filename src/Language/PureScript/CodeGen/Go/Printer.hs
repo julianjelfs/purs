@@ -268,7 +268,7 @@ printGoIdent = sanitise . \case
   Go.ImportedIdent package ident ->
     printGoPackage package <> "." <> mkPublic ident
   Go.LocalIdent ident ->
-    ident
+    fixKeywords ident
   where
   mkPublic :: Text -> Text
   mkPublic = ("Public_" <>)
@@ -276,13 +276,26 @@ printGoIdent = sanitise . \case
   mkPrivate :: Text -> Text
   mkPrivate = ("private_" <>)
 
+  fixKeywords :: Text -> Text
+  fixKeywords text
+    | text `elem` keywords = text <> "_"
+    | otherwise = text
+
   sanitise :: Text -> Text
-  sanitise = appEndo $ foldMap Endo
+  sanitise = applyAll
     [ Text.replace "'" "_" ]
+
+
+keywords :: [Text]
+keywords = ["go"]
 
 
 showT :: Show a => a -> Text
 showT = Text.pack . show
+
+
+applyAll :: [a -> a] -> a -> a
+applyAll = appEndo . foldMap Endo
 
 
 _mapFirstChar :: (Char -> Char) -> Text -> Text

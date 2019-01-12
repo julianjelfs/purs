@@ -548,10 +548,10 @@ localIdent = Go.LocalIdent . unIdent
 
 
 unIdent :: Names.Ident -> Text
-unIdent (Names.Ident ident)            = ident
 unIdent (Names.GenIdent Nothing n)     = "gen__" <> Text.pack (show n)
 unIdent (Names.GenIdent (Just name) n) = "gen__" <> name <> Text.pack (show n)
 unIdent Names.UnusedIdent              = "unused"
+unIdent (Names.Ident ident)            = ident
 
 
 -- UTIL
