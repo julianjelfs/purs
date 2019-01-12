@@ -14,12 +14,13 @@ import qualified Language.PureScript.Names as Names
 import qualified Language.PureScript.Constants as Constants
 import qualified Language.PureScript.Types as Types
 import qualified Language.PureScript.AST.Literals as Literals
+import qualified Language.PureScript.Environment as Environment
 
 import Control.Applicative ((<|>))
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
-import Data.Foldable (fold)
+import Data.Foldable (fold, foldl')
 import Data.Function ((&))
 import Data.Maybe (mapMaybe)
 import Data.Bifunctor (bimap)
@@ -31,8 +32,9 @@ moduleToGo
   => CoreFn.Module CoreFn.Ann
   -> FilePath
   -- ^ Import path prefix (e.g. goModuleName/outputDir)
+  -> Environment.Environment
   -> m Go.File
-moduleToGo core importPrefix =
+moduleToGo core importPrefix env =
   pure . Optimizer.optimize $ Go.File {..}
   where
   filePackage :: Go.Package
@@ -47,7 +49,8 @@ moduleToGo core importPrefix =
   fileDecls =
     let ctx     = mkContext core
         binds   = flattenBinds (CoreFn.moduleDecls core)
-    in  extractTypeDecls ctx binds <> foldMap (bindToGo Map.empty ctx) binds
+    in  extractTypeDecls ctx binds <>
+          foldMap (bindToGo (initialScope ctx env) ctx) binds
 
 
 -- | CoreFn.moduleImports with filtering.
@@ -87,6 +90,18 @@ mkContext CoreFn.Module {..} =
 
 isExported :: Context -> Names.Ident -> Bool
 isExported (Context _ exports) = flip elem exports
+
+
+type Scope = Map.Map Go.Ident Go.Type
+
+
+initialScope :: Context -> Environment.Environment -> Scope
+initialScope ctx = foldl' folder Map.empty . Map.toList . Environment.names
+  where
+  folder
+    :: Scope -> (Names.Qualified Names.Ident, (Types.Type, a, b)) -> Scope
+  folder accum (qualifiedIdent, (t, _, _)) =
+    Map.insert (qualifiedIdentToGo ctx qualifiedIdent) (typeToGo ctx t) accum
 
 
 data Bind = Bind
@@ -186,13 +201,6 @@ bindToGo scope ctx (Bind _ ident expr) = case expr of
 
   _ ->
     case typeToGo ctx <$> annType (CoreFn.extractAnn expr) of
-      Just funcType@(Go.FuncType _ _) ->
-        [ Go.VarDecl
-            (identToGo (moduleExports ctx) ident)
-             funcType
-            (wrapFunc (exprToGo scope ctx expr) funcType)
-        ]
-
       Just varType ->
         [ Go.VarDecl
             (identToGo (moduleExports ctx) ident)
@@ -202,44 +210,6 @@ bindToGo scope ctx (Bind _ ident expr) = case expr of
 
       -- XXX
       Nothing -> error (show expr)
-
-
-{- FIXME
-
-Functions can be rebound with a less polymorphic type:
-
-   identityInt :: Int -> Int
-   identityInt = Prelude.identity
-
-But with the immediately available type information we can't tell what needs to
-happen in terms of assertions etc (the annotation says Prelude.identity has type
-Int -> Int). How are we going to get the types from imported modules?
-
--}
-
-
--- | This is kinda like a monomorphisation.
---
-wrapFunc :: Go.Expr -> Go.Type -> Go.Expr
-wrapFunc expr = go []
-  where
-  go :: [Go.Expr] -> Go.Type -> Go.Expr
-  go vars (Go.FuncType argType returnType) =
-    Go.AbsExpr (argIdent, argType) returnType . Go.return $
-      case returnType of
-        Go.FuncType _ _ ->
-          go (argVar : vars) returnType
-        _ ->
-          Go.TypeAssertExpr returnType (foldr (flip Go.AppExpr) expr (argVar : vars))
-    where
-    argIdent :: Go.Ident
-    argIdent = Go.LocalIdent ("v" <> showT (length vars))
-
-    argVar :: Go.Expr
-    argVar = Go.VarExpr argType argIdent
-
-  -- Shouldn't really get here...
-  go _ _ = expr
 
 
 constructorFunc
@@ -292,9 +262,6 @@ constructorFunc ctx typeName ctorName (value :| values) =
     )
 
 
-type Scope = Map.Map Go.Ident Go.Type
-
-
 exprToGo
   :: Scope
   -> Context
@@ -324,7 +291,7 @@ exprToGo scope ctx = \case
   expr@(CoreFn.Var ann name) ->
     let ident = qualifiedIdentToGo ctx name in
 
-    case (typeToGo ctx <$> annType ann) <|> Map.lookup ident scope of
+    case Map.lookup ident scope <|> (typeToGo ctx <$> annType ann) of
       Just t ->
         Go.VarExpr t ident
 

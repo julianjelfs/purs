@@ -303,8 +303,12 @@ typeAssert want expr = case expr of
 
   VarExpr varType _ ->
     case varType of
+      FuncType _ _
+        | varType /= want -> wrapFunc expr want
+
       EmptyInterfaceType ->
         TypeAssertExpr want expr
+
       _ ->
         expr
 
@@ -362,6 +366,30 @@ typeAssertBinOp lhs rhs =
     (otherType         , EmptyInterfaceType) -> (lhs, TypeAssertExpr otherType rhs)
     (EmptyInterfaceType, otherType         ) -> (TypeAssertExpr otherType lhs, rhs)
     (_                 , _                 ) -> (lhs, rhs)
+
+
+-- | This is kinda like a monomorphisation.
+--
+wrapFunc :: Expr -> Type -> Expr
+wrapFunc expr = go []
+  where
+  go :: [Expr] -> Type -> Expr
+  go vars (FuncType argType returnType) =
+    AbsExpr (argIdent, argType) returnType . return $
+      case returnType of
+        FuncType _ _ ->
+          go (argVar : vars) returnType
+        _ ->
+          typeAssert returnType (foldr (flip AppExpr) expr (argVar : vars))
+    where
+    argIdent :: Ident
+    argIdent = LocalIdent ("v" <> Text.pack (show $ length vars))
+
+    argVar :: Expr
+    argVar = VarExpr argType argIdent
+
+  -- Shouldn't really get here...
+  go _ _ = expr
 
 
 letExpr :: Ident -> Expr -> Expr -> Expr

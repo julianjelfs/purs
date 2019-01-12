@@ -151,7 +151,7 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
     (path, ) <$> readTextFile path
 
   codegen :: CF.Module CF.Ann -> Environment -> Externs -> SupplyT Make ()
-  codegen m _ exts = do
+  codegen m env exts = do
     let mn = CF.moduleName m
     lift $ writeTextFile (outputFilename mn "externs.json") exts
     codegenTargets <- lift $ asks optionsCodegenTargets
@@ -182,7 +182,7 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
         when sourceMaps $ genSourceMap dir mapFile (length prefix) mappings
     when (S.member Go codegenTargets) $ do
       let importPrefix = T.unpack (Go.modFileModule Go.defaultModFile)
-      rawGo <- Go.moduleToGo m (importPrefix </> outputDir)
+      rawGo <- Go.moduleToGo m (importPrefix </> outputDir) env
       let go = printGo rawGo
           goFile = targetFilename mn Go
       lift (writeTextFile goFile (B.fromStrict $ TE.encodeUtf8 $ go))
