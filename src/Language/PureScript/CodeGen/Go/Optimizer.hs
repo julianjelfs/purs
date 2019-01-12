@@ -30,6 +30,9 @@ optimizeDecl = \case
   Go.TypeDecl ident t ->
     Go.TypeDecl ident t
 
+  Go.VarDecl ident t (LetExpr ident' lhs rhs) ->
+    optimizeDecl (Go.VarDecl ident t (Go.BlockExpr (Go.AssignStmnt ident' lhs rhs)))
+
   Go.VarDecl ident t expr
     -- Declare with const where possible
     | canConst expr -> Go.ConstDecl ident t (optimizeExpr expr)

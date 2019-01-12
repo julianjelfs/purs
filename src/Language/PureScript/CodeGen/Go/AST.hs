@@ -330,12 +330,15 @@ typeAssert want expr = case expr of
   AbsExpr param result body ->
     AbsExpr param result (mapBlock (typeAssert result) body)
 
+  -- This case is tricky...
   AppExpr lhs rhs ->
     case getExprType lhs of
-      FuncType _ EmptyInterfaceType ->
-        TypeAssertExpr want (AppExpr (typeAssert want lhs) (typeAssert want rhs))
+      FuncType argType EmptyInterfaceType ->
+        TypeAssertExpr want (AppExpr (typeAssert want lhs) (typeAssert argType rhs))
+      FuncType argType _ ->
+        AppExpr (typeAssert want lhs) (typeAssert argType rhs)
       _ ->
-        AppExpr (typeAssert want lhs) (typeAssert want rhs)
+        undefined
 
   BooleanOpExpr op ->
     BooleanOpExpr $ case op of

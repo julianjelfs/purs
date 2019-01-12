@@ -71,6 +71,15 @@ printGoBlock = \case
     "panic(\"" <> why <> "\");"
 
   -- Inductive cases
+
+  Go.AssignStmnt ident expr@(Go.AbsExpr field t _) block ->
+    -- NOTE: This requires special treatment, as functions need to be declared
+    -- first in order to be referenced recursively
+    Text.concat
+      [ "var ", printGoIdent ident, " func(", printGoField field, ") ", printGoType t, ";"
+      , printGoIdent ident, " = ", printGoExpr expr, ";", printGoBlock block
+      ]
+
   Go.AssignStmnt ident expr block ->
     printGoIdent ident <> " := " <> printGoExpr expr <> "; " <> printGoBlock block
 
