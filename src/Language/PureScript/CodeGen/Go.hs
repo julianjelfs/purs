@@ -186,6 +186,13 @@ bindToGo scope ctx (Bind _ ident expr) = case expr of
 
   _ ->
     case typeToGo ctx <$> annType (CoreFn.extractAnn expr) of
+      Just funcType@(Go.FuncType _ _) ->
+        [ Go.VarDecl
+            (identToGo (moduleExports ctx) ident)
+             funcType
+            (wrapFunc (exprToGo scope ctx expr) funcType)
+        ]
+
       Just varType ->
         [ Go.VarDecl
             (identToGo (moduleExports ctx) ident)
@@ -195,6 +202,44 @@ bindToGo scope ctx (Bind _ ident expr) = case expr of
 
       -- XXX
       Nothing -> error (show expr)
+
+
+{- FIXME
+
+Functions can be rebound with a less polymorphic type:
+
+   identityInt :: Int -> Int
+   identityInt = Prelude.identity
+
+But with the immediately available type information we can't tell what needs to
+happen in terms of assertions etc (the annotation says Prelude.identity has type
+Int -> Int). How are we going to get the types from imported modules?
+
+-}
+
+
+-- | This is kinda like a monomorphisation.
+--
+wrapFunc :: Go.Expr -> Go.Type -> Go.Expr
+wrapFunc expr = go []
+  where
+  go :: [Go.Expr] -> Go.Type -> Go.Expr
+  go vars (Go.FuncType argType returnType) =
+    Go.AbsExpr (argIdent, argType) returnType . Go.return $
+      case returnType of
+        Go.FuncType _ _ ->
+          go (argVar : vars) returnType
+        _ ->
+          Go.TypeAssertExpr returnType (foldr (flip Go.AppExpr) expr (argVar : vars))
+    where
+    argIdent :: Go.Ident
+    argIdent = Go.LocalIdent ("v" <> showT (length vars))
+
+    argVar :: Go.Expr
+    argVar = Go.VarExpr argType argIdent
+
+  -- Shouldn't really get here...
+  go _ _ = expr
 
 
 constructorFunc

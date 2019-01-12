@@ -267,8 +267,6 @@ getExprType = \case
   AppExpr lhs _ ->
     case getExprType lhs of
       FuncType _ returnType -> returnType
-      --         ^^^^^^^^^^
-      -- NOTE: Returning the _actual_ type rather than the type we _want_
       other -> error ("bad App type: " <> show other)
 
   StructAccessorExpr expr ident ->
