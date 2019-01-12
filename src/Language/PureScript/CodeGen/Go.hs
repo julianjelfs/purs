@@ -51,7 +51,8 @@ moduleToGo core importPrefix =
 
 
 -- | CoreFn.moduleImports with filtering.
-filteredModuleImports :: CoreFn.Module CoreFn.Ann -> [(CoreFn.Ann, Names.ModuleName)]
+filteredModuleImports
+  :: CoreFn.Module CoreFn.Ann -> [(CoreFn.Ann, Names.ModuleName)]
 filteredModuleImports core = CoreFn.moduleImports core & filter
   (\(_, mn) -> mn /= CoreFn.moduleName core && mn `notElem` Constants.primModules)
 
@@ -82,6 +83,10 @@ mkContext CoreFn.Module {..} =
     CoreFn.Constructor _ typeName _ _
       | ident `elem` moduleExports -> Just typeName
     _ -> Nothing
+
+
+isExported :: Context -> Names.Ident -> Bool
+isExported (Context _ exports) = flip elem exports
 
 
 data Bind = Bind
@@ -128,9 +133,17 @@ extractTypeDecls ctx = fmap (uncurry typeDecl) . Map.toList . typeMap
     -> [Names.Ident]
     -> Go.Field
   constructorToField ctorName values =
-    ( constructorNameProperty ctorName
+    ( ctorNameIdent ctx ctorName
     , Go.PointerType . Go.StructType $
-        (\value -> (localIdent value, Go.EmptyInterfaceType)) <$> values
+        fmap
+        (\value ->
+            ( if isExported ctx (unCtorName ctorName)
+                 then publicIdent value
+                 else privateIdent value
+            , Go.EmptyInterfaceType
+            )
+        )
+        values
     )
 
 
@@ -149,7 +162,7 @@ bindToGo scope ctx (Bind _ ident expr) = case expr of
              (identToGo (moduleExports ctx) ident)
              (localIdent arg, typeToGo ctx argType)
              returnType
-             (Go.return . Go.typeAssert returnType $ valueToGo scope' ctx body)
+             (Go.return . Go.typeAssert returnType $ exprToGo scope' ctx body)
          ]
        Just _  -> undefined
        Nothing -> undefined
@@ -157,19 +170,19 @@ bindToGo scope ctx (Bind _ ident expr) = case expr of
   CoreFn.Constructor _ann typeName ctorName [] ->
     let typeIdent = typeNameIdent ctx typeName in
     [ Go.VarDecl
-        (constructorNameIdent ctx ctorName)
+        (ctorNameIdent ctx ctorName)
         (Go.NamedType typeIdent)
         (Go.LiteralExpr $ Go.NamedStructLiteral
           typeIdent
-          [ ( constructorNameProperty ctorName
+          [ ( ctorNameIdent ctx ctorName
             , Go.ReferenceExpr Go.emptyStructLiteral
             )
           ]
         )
     ]
 
-  CoreFn.Constructor _ann typeName ctorName (ctor : ctors ) ->
-    [ constructorFunc ctx typeName ctorName (ctor :| ctors) ]
+  CoreFn.Constructor _ann typeName ctorName (value : values ) ->
+    [ constructorFunc ctx typeName ctorName (value :| values) ]
 
   _ ->
     case typeToGo ctx <$> annType (CoreFn.extractAnn expr) of
@@ -177,7 +190,7 @@ bindToGo scope ctx (Bind _ ident expr) = case expr of
         [ Go.VarDecl
             (identToGo (moduleExports ctx) ident)
              varType
-            (Go.typeAssert varType $ valueToGo scope ctx expr)
+            (Go.typeAssert varType $ exprToGo scope ctx expr)
         ]
 
       -- XXX
@@ -190,28 +203,36 @@ constructorFunc
   -> Names.ProperName 'Names.ConstructorName
   -> NonEmpty Names.Ident
   -> Go.Decl
-constructorFunc ctx typeName ctorName (ctor :| ctors) =
+constructorFunc ctx typeName ctorName (value :| values) =
   Go.FuncDecl
-    (identToGo (moduleExports ctx) (unConstructorName ctorName))
-    (localIdent ctor, Go.EmptyInterfaceType)
+    (identToGo (moduleExports ctx) (unCtorName ctorName))
+    (localIdent value, Go.EmptyInterfaceType)
     `uncurry`
-    (Go.return <$> go ctors)
+    (Go.return <$> go values)
   where
   go :: [Names.Ident] -> (Go.Type, Go.Expr)
   go [] =
     ( Go.NamedType (typeNameIdent ctx typeName)
     , Go.LiteralExpr $ Go.NamedStructLiteral
         (typeNameIdent ctx typeName)
-        [ ( constructorNameProperty ctorName
+        [ ( ctorNameIdent ctx ctorName
           , Go.ReferenceExpr . Go.LiteralExpr $
               Go.StructLiteral
-                (fmap (\ctor' ->
-                   (localIdent ctor', Go.EmptyInterfaceType))
-                   (ctor : ctors))
-                (fmap (\ctor' ->
-                   (localIdent ctor',
-                      Go.VarExpr Go.EmptyInterfaceType (localIdent ctor)))
-                   (ctor : ctors))
+                (fmap (\value' ->
+                   ( if isExported ctx (unCtorName ctorName)
+                        then publicIdent value'
+                        else privateIdent value'
+                   , Go.EmptyInterfaceType
+                   ))
+                   (value : values))
+                (fmap (\value' ->
+                   ( if isExported ctx (unCtorName ctorName)
+                        then publicIdent value'
+                        else privateIdent value'
+                   , Go.VarExpr Go.EmptyInterfaceType
+                       (localIdent value')
+                   ))
+                   (value : values))
           )
         ]
     )
@@ -219,19 +240,22 @@ constructorFunc ctx typeName ctorName (ctor :| ctors) =
   go (ctor' : rest) =
     let (gotype, expr) = go rest in
     ( Go.FuncType Go.EmptyInterfaceType gotype
-    , Go.AbsExpr (localIdent ctor', Go.EmptyInterfaceType) gotype (Go.return expr)
+    , Go.AbsExpr
+        (localIdent ctor', Go.EmptyInterfaceType)
+         gotype
+        (Go.return expr)
     )
 
 
 type Scope = Map.Map Go.Ident Go.Type
 
 
-valueToGo
+exprToGo
   :: Scope
   -> Context
   -> CoreFn.Expr CoreFn.Ann
   -> Go.Expr
-valueToGo scope ctx = \case
+exprToGo scope ctx = \case
   CoreFn.Literal ann literal ->
     Go.LiteralExpr (literalToGo scope ctx ann literal)
 
@@ -242,14 +266,14 @@ valueToGo scope ctx = \case
         Go.AbsExpr
           (localIdent arg, typeToGo ctx argType)
           (typeToGo ctx returnType)
-          (Go.return $ valueToGo scope' ctx body)
+          (Go.return $ exprToGo scope' ctx body)
 
       Just _  -> undefined
 
       Nothing -> undefined
 
   CoreFn.App _ann lhs rhs ->
-    Go.AppExpr (valueToGo scope ctx lhs) (valueToGo scope ctx rhs)
+    Go.AppExpr (exprToGo scope ctx lhs) (exprToGo scope ctx rhs)
 
   -- TODO: Look at the CoreFn.Meta and case accordingly.
   expr@(CoreFn.Var ann name) ->
@@ -302,7 +326,7 @@ caseToGo scope ctx ann = (Go.BlockExpr .) . go
       Right expr ->
         Go.ifElse
           (foldConditions (substitute <$> conditions))
-          (Go.return . substitute $ valueToGo scope ctx expr)
+          (Go.return . substitute $ exprToGo scope ctx expr)
           (go exprs rest)
 
   foldConditions :: [Go.Expr] -> Go.Expr
@@ -325,7 +349,7 @@ binderToGo scope ctx expr = \case
 
   CoreFn.VarBinder _ann ident ->
    substitution (localIdent ident)
-     (either id (valueToGo scope ctx) expr)
+     (either id (exprToGo scope ctx) expr)
 
   CoreFn.LiteralBinder _ann literal ->
     literalBinderToGo scope ctx expr literal
@@ -334,10 +358,18 @@ binderToGo scope ctx expr = \case
     case ann of
       (_, _, _, Just (CoreFn.IsConstructor _ idents')) ->
         let idents :: [Go.Ident]
-            idents = localIdent <$> idents'
+            idents =
+              case ctorName' of
+                Names.Qualified qual name
+                  | maybe False (/= currentModule ctx) qual ->
+                      publicIdent <$> idents'
+                  | isExported ctx (unCtorName name) ->
+                      publicIdent <$> idents'
+                  | otherwise ->
+                     privateIdent <$> idents'
 
             ctorName :: Go.Ident
-            ctorName = constructorNameProperty (Names.disqualify ctorName')
+            ctorName = qualifiedCtorNameIdent ctx ctorName'
 
             constructType :: Go.Type
             constructType =
@@ -350,7 +382,7 @@ binderToGo scope ctx expr = \case
             construct :: Go.Expr
             construct =
               Go.StructAccessorExpr
-                (case either id (valueToGo scope ctx) expr of
+                (case either id (exprToGo scope ctx) expr of
                    Go.VarExpr _ ident -> Go.VarExpr constructType ident
                    other -> other
                 )
@@ -386,7 +418,7 @@ literalBinderToGo
 literalBinderToGo scope ctx expr = \case
   Literals.NumericLiteral (Left integer) ->
     condition $
-      either id (valueToGo scope ctx) expr
+      either id (exprToGo scope ctx) expr
         `Go.eq` Go.LiteralExpr (Go.IntLiteral integer)
 
   _ ->
@@ -406,9 +438,9 @@ letToGo    -- let it go, let it gooo
 letToGo scope ctx binds expr = go (flattenBinds binds)
   where
   go :: [Bind] -> Go.Expr
-  go [] = valueToGo scope ctx expr
+  go [] = exprToGo scope ctx expr
   go (Bind _ ident value : rest) =
-    Go.letExpr (localIdent ident) (valueToGo scope ctx value) (go rest)
+    Go.letExpr (localIdent ident) (exprToGo scope ctx value) (go rest)
 
 
 literalToGo
@@ -436,14 +468,14 @@ literalToGo scope ctx ann = \case
   Literals.ArrayLiteral items ->
     case typeToGo ctx <$> annType ann of
       Just (Go.SliceType itemType) ->
-        Go.SliceLiteral itemType (valueToGo scope ctx <$> items)
+        Go.SliceLiteral itemType (exprToGo scope ctx <$> items)
       Just _ ->
         undefined
       Nothing ->
         undefined
 
   Literals.ObjectLiteral keyValues ->
-    Go.objectLiteral (bimap showT (valueToGo scope ctx) <$> keyValues)
+    Go.objectLiteral (bimap showT (exprToGo scope ctx) <$> keyValues)
 
 
 typeToGo :: Context -> Types.Type -> Go.Type
@@ -516,19 +548,25 @@ unTypeName typeName = Names.Ident (Names.runProperName typeName <> "Type")
 
 
 typeNameIdent :: Context -> Names.ProperName 'Names.TypeName -> Go.Ident
-typeNameIdent ctx= identToGo (moduleExports ctx) . unTypeName
+typeNameIdent ctx = identToGo (moduleExports ctx) . unTypeName
 
 
-unConstructorName :: Names.ProperName 'Names.ConstructorName -> Names.Ident
-unConstructorName typeName = Names.Ident (Names.runProperName typeName)
+unCtorName
+  :: Names.ProperName 'Names.ConstructorName -> Names.Ident
+unCtorName typeName = Names.Ident (Names.runProperName typeName)
 
 
-constructorNameIdent :: Context -> Names.ProperName 'Names.ConstructorName -> Go.Ident
-constructorNameIdent ctx = identToGo (moduleExports ctx) . unConstructorName
+ctorNameIdent
+  :: Context -> Names.ProperName 'Names.ConstructorName -> Go.Ident
+ctorNameIdent ctx = identToGo (moduleExports ctx) . unCtorName
 
 
-constructorNameProperty :: Names.ProperName 'Names.ConstructorName -> Go.Ident
-constructorNameProperty = Go.mapIdent ("_"<>) . localIdent . unConstructorName
+qualifiedCtorNameIdent
+  :: Context
+  -> Names.Qualified (Names.ProperName 'Names.ConstructorName)
+  -> Go.Ident
+qualifiedCtorNameIdent ctx =
+  qualifiedIdentToGo ctx . fmap unCtorName
 
 
 publicIdent :: Names.Ident -> Go.Ident
@@ -540,7 +578,8 @@ privateIdent = Go.VisibleIdent Go.Private . unIdent
 
 
 importedIdent :: Names.ModuleName -> Names.Ident -> Go.Ident
-importedIdent mn ident = Go.ImportedIdent (Go.packageFromModuleName mn) (unIdent ident)
+importedIdent mn ident =
+  Go.ImportedIdent (Go.packageFromModuleName mn) (unIdent ident)
 
 
 localIdent :: Names.Ident -> Go.Ident
@@ -559,11 +598,6 @@ unIdent (Names.Ident ident)            = ident
 
 annType :: CoreFn.Ann -> Maybe Types.Type
 annType (_, _, mbType, _) = mbType
-
-
-_addType :: Types.Type -> CoreFn.Expr CoreFn.Ann -> CoreFn.Expr CoreFn.Ann
-_addType t = CoreFn.modifyAnn $ \(sourceSpan, comments, _, meta) ->
-  (sourceSpan, comments, Just t, meta)
 
 
 unTypeApp :: Types.Type -> [Types.Type]
@@ -605,3 +639,7 @@ pattern FunctionApp lhs rhs <-
 --pattern SumType :: [Names.Ident] -> CoreFn.Ann
 --pattern SumType values <-
 --  (_, _, _, Just (CoreFn.IsConstructor CoreFn.SumType values))
+
+--_addType :: Types.Type -> CoreFn.Expr CoreFn.Ann -> CoreFn.Expr CoreFn.Ann
+--_addType t = CoreFn.modifyAnn $ \(sourceSpan, comments, _, meta) ->
+--  (sourceSpan, comments, Just t, meta)

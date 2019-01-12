@@ -122,6 +122,9 @@ printGoExpr = \case
   Go.DereferenceExpr expr ->
     "*" <> printGoExpr expr
 
+  Go.StructAccessorExpr expr (Go.ImportedIdent _ ident) ->
+    printGoExpr expr <> "." <> printGoIdent (Go.VisibleIdent Go.Public ident)
+
   Go.StructAccessorExpr expr ident ->
     printGoExpr expr <> "." <> printGoIdent ident
 
