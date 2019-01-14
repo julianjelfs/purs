@@ -334,7 +334,17 @@ caseToGo scope ctx ann = (Go.BlockExpr .) . go
           foldr ($) expr (uncurry Go.substituteVar <$> substitutions)
     in
     case result of
-      Left _ -> undefined
+      Left guardedExprs ->
+        foldl'
+          (\accum (guard, expr) ->
+              Go.ifElse
+                (foldConditions (substitute <$> snoc conditions (exprToGo scope ctx guard)))
+                (Go.return . substitute $ exprToGo scope ctx expr)
+                accum
+          )
+          (go exprs rest)
+          guardedExprs
+
       Right expr ->
         Go.ifElse
           (foldConditions (substitute <$> conditions))
@@ -633,6 +643,10 @@ zipFoldWith f as bs = fold (zipWith f as bs)
 
 singleton :: a -> [a]
 singleton = (:[])
+
+
+snoc :: [a] -> a -> [a]
+snoc as a = as <> [a]
 
 
 -- PATTERN SYNONYMS
