@@ -16,14 +16,13 @@ import qualified Language.PureScript.Types as Types
 import qualified Language.PureScript.AST.Literals as Literals
 import qualified Language.PureScript.Environment as Environment
 
-import Control.Applicative ((<|>))
 import Control.Monad (foldM, zipWithM)
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
 import Data.Functor ((<&>))
-import Data.Foldable (fold, foldl')
 import Data.Maybe (mapMaybe)
+import Data.Foldable (fold, asum)
 import Data.Bifunctor (bimap)
 import Language.PureScript.CodeGen.Go.Plumbing as Plumbing
 
@@ -55,7 +54,8 @@ moduleToGo core importPrefix env = do
     let ctx = mkContext core
     let binds = flattenBinds (CoreFn.moduleDecls core)
     let typeDecls = extractTypeDecls ctx binds
-    valueDecls <- traverse (bindToGo (initialScope ctx env) ctx) binds
+    scope <- initialScope ctx env
+    valueDecls <- traverse (bindToGo scope ctx) binds
     pure (typeDecls <> mconcat valueDecls)
 
 
@@ -109,13 +109,15 @@ isExported (Context _ exports) = flip elem exports
 type Scope = Map.Map Go.Ident Go.Type
 
 
-initialScope :: Context -> Environment.Environment -> Scope
-initialScope ctx = foldl' folder Map.empty . Map.toList . Environment.names
+initialScope :: forall m. Monad m => Context -> Environment.Environment -> m Scope
+initialScope ctx = foldM folder Map.empty . Map.toList . Environment.names
   where
   folder
-    :: Scope -> (Names.Qualified Names.Ident, (Types.Type, a, b)) -> Scope
-  folder accum (qualifiedIdent, (t, _, _)) =
-    Map.insert (qualifiedIdentToGo ctx qualifiedIdent) (typeToGo ctx t) accum
+    :: Scope -> (Names.Qualified Names.Ident, (Types.Type, a, b)) -> m Scope
+  folder accum (qualifiedIdent, (t', _, _)) = do
+    let ident = qualifiedIdentToGo ctx qualifiedIdent
+    t <- typeToGo ctx t'
+    pure (Map.insert ident t accum)
 
 
 data Bind = Bind
@@ -189,8 +191,8 @@ bindToGo scope ctx bind = case bindExpr bind of
      case annType ann of
        Just (FunctionApp argType' returnType') -> do
          let arg = localIdent arg'
-         let argType = typeToGo ctx argType'
-         let returnType = typeToGo ctx returnType'
+         argType <- typeToGo ctx argType'
+         returnType <- typeToGo ctx returnType'
          body <- exprToGo (Map.insert arg argType scope) ctx body'
 
          let funcDecl = Go.FuncDecl
@@ -218,15 +220,14 @@ bindToGo scope ctx bind = case bindExpr bind of
     singleton <$> constructorToGo ctx typeName ctorName (value :| values)
 
   -- Anything else becomes a var declaration
-  expr ->
-    case typeToGo ctx <$> annType (CoreFn.extractAnn expr) of
-      Just varType -> do
+  expr -> do
+    case annType (CoreFn.extractAnn expr) of
+      Nothing -> undefined
+      Just t' -> do
         let varName = identToGo (moduleExports ctx) (bindIdent bind)
+        varType <- typeToGo ctx t'
         varValue <- exprToGo scope ctx expr
         pure [ Go.VarDecl varName varType (Go.typeAssert varType varValue) ]
-
-      -- XXX
-      Nothing -> error (show expr)
 
 
 exprToGo
@@ -243,8 +244,8 @@ exprToGo scope ctx = \case
     case annType ann of
       Just (FunctionApp argType' returnType') -> do
         let arg = localIdent arg'
-        let argType = typeToGo ctx argType'
-        let returnType = typeToGo ctx returnType'
+        argType <- typeToGo ctx argType'
+        returnType <- typeToGo ctx returnType'
         body <- exprToGo (Map.insert arg argType scope) ctx body'
 
         pure (Go.AbsExpr (arg, argType) returnType (Go.return body))
@@ -261,7 +262,11 @@ exprToGo scope ctx = \case
   -- TODO: Look at the meta and case accordingly.
   expr@(CoreFn.Var ann name) -> do
     let ident = qualifiedIdentToGo ctx name
-    case Map.lookup ident scope <|> (typeToGo ctx <$> annType ann) of
+    mbType <- fmap asum . sequence $
+      [ pure (Map.lookup ident scope)
+      , withMaybeM (typeToGo ctx) (annType ann)
+      ]
+    case mbType of
       Just t ->
         pure $ Go.VarExpr t ident
 
@@ -292,8 +297,12 @@ caseToGo scope ctx ann patterns' alternatives =
   Go.BlockExpr <$> go patterns' alternatives
   where
   go :: [CoreFn.Expr CoreFn.Ann] -> [CoreFn.CaseAlternative CoreFn.Ann] -> m Go.Block
-  go _ [] =
-    pure $ Go.panic (maybe undefined (typeToGo ctx) (annType ann)) "Failed pattern match"
+  go _ [] = do
+    mbType <- withMaybeM (typeToGo ctx) (annType ann)
+    case mbType of
+      Nothing -> undefined
+      Just panicType ->
+        pure (Go.panic panicType "Failed pattern match")
 
   go patterns (CoreFn.CaseAlternative caseBinders caseResult : rest) = do
     (conditions, substitutions) <-
@@ -449,7 +458,7 @@ literalToGo scope ctx ann = \case
     pure $ Go.BoolLiteral bool
 
   Literals.ArrayLiteral items ->
-    case typeToGo ctx <$> annType ann of
+    withMaybeM (typeToGo ctx) (annType ann) >>= \case
       Just (Go.SliceType itemType) ->
         Go.SliceLiteral itemType <$> traverse (exprToGo scope ctx) items
       Just _ ->
@@ -462,46 +471,61 @@ literalToGo scope ctx ann = \case
       traverse (sequence . bimap showT (exprToGo scope ctx)) keyValues
 
 
-typeToGo :: Context -> Types.Type -> Go.Type
+typeToGo :: Monad m => Context -> Types.Type -> m Go.Type
 typeToGo ctx = \case
   FunctionApp x y ->
-    Go.FuncType (typeToGo ctx x) (typeToGo ctx y)
+    Go.FuncType <$> typeToGo ctx x <*> typeToGo ctx y
 
   Types.ForAll _ t _ ->
     typeToGo ctx t
 
+  Types.ConstrainedType _ t ->
+    typeToGo ctx t
+
+  Types.KindedType t _ ->
+    typeToGo ctx t
+
   Prim "Boolean" ->
-    Go.BasicType Go.BoolType
+    pure $ Go.BasicType Go.BoolType
 
   Prim "Int" ->
-    Go.BasicType Go.IntType
+    pure $ Go.BasicType Go.IntType
 
   Prim "Number" ->
-    Go.BasicType Go.Float64Type
+    pure $ Go.BasicType Go.Float64Type
 
   Prim "String" ->
-    Go.BasicType Go.StringType
+    pure $ Go.BasicType Go.StringType
 
   Prim "Char" ->
-    Go.BasicType Go.RuneType -- ???
+    pure $ Go.BasicType Go.RuneType -- ???
 
   Types.TypeVar{} ->
-    Go.EmptyInterfaceType
+    pure Go.EmptyInterfaceType
 
   Types.Skolem{} ->
-    Go.EmptyInterfaceType
+    pure Go.EmptyInterfaceType
 
   Types.TypeApp (Prim "Array") itemType ->
-    Go.SliceType (typeToGo ctx itemType)
+    Go.SliceType <$> typeToGo ctx itemType
 
   Types.TypeApp (Prim "Record") _ ->
-    Go.objectType
+    pure Go.objectType
+
+  Types.RCons{} ->
+    pure Go.objectType
+
+  Types.REmpty{} ->
+    pure Go.objectType
+
+  Types.TypeConstructor typeName ->
+    pure $ Go.NamedType (qualifiedIdentToGo ctx (unTypeName <$> typeName))
 
   (head . unTypeApp -> Types.TypeConstructor typeName) ->
-    Go.NamedType (qualifiedIdentToGo ctx (unTypeName <$> typeName))
+    pure $ Go.NamedType (qualifiedIdentToGo ctx (unTypeName <$> typeName))
 
-  -- XXX
-  ty -> Go.UnknownType (show ty)
+  unsupportedType -> undefined unsupportedType
+
 
 
 letToGo    -- let it go, let it gooo
@@ -667,6 +691,11 @@ singleton = (:[])
 
 snoc :: [a] -> a -> [a]
 snoc as a = as <> [a]
+
+
+withMaybeM :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
+withMaybeM _ Nothing = pure Nothing
+withMaybeM f (Just a) = Just <$> f a
 
 
 -- PATTERN SYNONYMS
