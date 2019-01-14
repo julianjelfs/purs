@@ -39,7 +39,7 @@ module Language.PureScript.CodeGen.Go.AST
   ) where
 
 import Prelude.Compat hiding (return, and)
-import Debug.Trace (traceShowId)
+import Debug.Trace (traceShow)
 
 import qualified Language.PureScript.Names as PS
 import qualified Data.Text as Text
@@ -171,8 +171,8 @@ getBlockType = \case
     getBlockType block
 
   IfElseStmnt _ yes no ->
-    let yesType = traceShowId $ getBlockType yes
-        noType  = traceShowId $ getBlockType no
+    let yesType = getBlockType yes
+        noType  = getBlockType no
     in  if yesType == noType then yesType else undefined
 
   PanicStmnt panicType _ ->
@@ -301,10 +301,10 @@ typeAssert want expr = case expr of
   DereferenceExpr{}         -> expr
   NilExpr{}                 -> expr
 
-  VarExpr varType _ ->
+  VarExpr varType ident ->
     case varType of
       FuncType _ _
-        | varType /= want -> wrapFunc expr want
+        | varType /= want -> wrapFunc expr (traceShow (ident, varType, want) want)
 
       EmptyInterfaceType ->
         TypeAssertExpr want expr
@@ -335,12 +335,14 @@ typeAssert want expr = case expr of
   -- This case is tricky...
   AppExpr lhs rhs ->
     case getExprType lhs of
-      FuncType argType EmptyInterfaceType ->
-        TypeAssertExpr want (AppExpr (typeAssert want lhs) (typeAssert argType rhs))
-      FuncType argType _ ->
-        AppExpr (typeAssert want lhs) (typeAssert argType rhs)
+      funcType@(FuncType argType returnType)
+        | returnType == EmptyInterfaceType ->
+            TypeAssertExpr want $
+              AppExpr (typeAssert funcType lhs) (typeAssert argType rhs)
+        | otherwise ->
+            AppExpr (typeAssert funcType lhs) (typeAssert argType rhs)
       _ ->
-        undefined
+        undefined  -- shouldn't happen
 
   BooleanOpExpr op ->
     BooleanOpExpr $ case op of
