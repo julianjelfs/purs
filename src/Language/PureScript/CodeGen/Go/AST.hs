@@ -24,6 +24,7 @@ module Language.PureScript.CodeGen.Go.AST
   , objectLiteral
   , objectType
   , emptyStructLiteral
+  , emptyStructReference
   , emptyStructType
   , return
   , panic
@@ -39,7 +40,6 @@ module Language.PureScript.CodeGen.Go.AST
   ) where
 
 import Prelude.Compat hiding (return, and)
-import Debug.Trace (traceShow)
 
 import qualified Language.PureScript.Names as PS
 import qualified Data.Text as Text
@@ -103,7 +103,23 @@ data Type
 
   -- XXX
   | UnknownType String
-  deriving (Show, Eq)
+  deriving (Show)
+
+instance Eq Type where
+  -- This instance would be derivable were it not for this panic case!
+  PanicType _ == _ = True
+  _ == PanicType _ = True
+
+  BasicType a        == BasicType b        = a == b
+  StructType a       == StructType b       = a == b
+  FuncType a c       == FuncType b d       = a == b && c == d
+  SliceType a        == SliceType b        = a == b
+  MapType a c        == MapType b d        = a == b && c == d
+  EmptyInterfaceType == EmptyInterfaceType = True
+  NamedType a        == NamedType b        = a == b
+  PointerType a      == PointerType b      = a == b
+  NilType a          == NilType b          = a == b
+  _                  == _                  = False
 
 
 -- | Go's fundamental types.
@@ -173,7 +189,7 @@ getBlockType = \case
   IfElseStmnt _ yes no ->
     let yesType = getBlockType yes
         noType  = getBlockType no
-    in  if yesType == noType then yesType else undefined
+    in  if yesType == noType then yesType else error (show yesType <> " " <> show noType)
 
   PanicStmnt panicType _ ->
     PanicType panicType
@@ -248,6 +264,10 @@ emptyStructLiteral :: Expr
 emptyStructLiteral = LiteralExpr (StructLiteral [] [])
 
 
+emptyStructReference :: Expr
+emptyStructReference = ReferenceExpr emptyStructLiteral
+
+
 emptyStructType :: Type
 emptyStructType = StructType []
 
@@ -301,10 +321,10 @@ typeAssert want expr = case expr of
   DereferenceExpr{}         -> expr
   NilExpr{}                 -> expr
 
-  VarExpr varType ident ->
+  VarExpr varType _ ->
     case varType of
       FuncType _ _
-        | varType /= want -> wrapFunc expr (traceShow (ident, varType, want) want)
+        | varType /= want -> wrapFunc expr want
 
       EmptyInterfaceType ->
         TypeAssertExpr want expr

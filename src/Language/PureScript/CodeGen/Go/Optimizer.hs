@@ -73,7 +73,14 @@ optimizeExpr = \case
     Go.LiteralExpr literal
 
   Go.BooleanOpExpr booleanOp ->
-    Go.BooleanOpExpr booleanOp
+    case booleanOp of
+      -- Remove redundant &&
+      Go.AndOp GoTrue rhs ->
+        optimizeExpr rhs
+      Go.AndOp lhs GoTrue ->
+        optimizeExpr lhs
+      _ ->
+        Go.BooleanOpExpr booleanOp
 
   Go.AbsExpr field t block ->
     case block of
@@ -131,6 +138,10 @@ isTrue = \case
   Go.LiteralExpr (Go.BoolLiteral True) -> True
   Go.BooleanOpExpr (Go.AndOp lhs rhs)  -> isTrue lhs && isTrue rhs
   _expr -> False
+
+
+pattern GoTrue :: Go.Expr
+pattern GoTrue = Go.LiteralExpr (Go.BoolLiteral True)
 
 
 pattern LetExpr :: Go.Ident -> Go.Expr -> Go.Block -> Go.Expr

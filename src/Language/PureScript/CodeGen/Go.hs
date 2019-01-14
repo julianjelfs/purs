@@ -17,25 +17,30 @@ import qualified Language.PureScript.AST.Literals as Literals
 import qualified Language.PureScript.Environment as Environment
 
 import Control.Applicative ((<|>))
+import Control.Monad (foldM, zipWithM)
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Text (Text)
+import Data.Functor ((<&>))
 import Data.Foldable (fold, foldl')
-import Data.Function ((&))
 import Data.Maybe (mapMaybe)
 import Data.Bifunctor (bimap)
 import Language.PureScript.CodeGen.Go.Plumbing as Plumbing
 
 
 moduleToGo
-  :: Monad m
+  :: forall m. Monad m
   => CoreFn.Module CoreFn.Ann
   -> FilePath
   -- ^ Import path prefix (e.g. goModuleName/outputDir)
   -> Environment.Environment
   -> m Go.File
-moduleToGo core importPrefix env =
-  pure . Optimizer.optimize $ Go.File {..}
+moduleToGo core importPrefix env = do
+  file <- Go.File
+    <$> pure filePackage
+    <*> pure fileImports
+    <*> fileDecls
+  pure (Optimizer.optimize file)
   where
   filePackage :: Go.Package
   filePackage =
@@ -45,27 +50,36 @@ moduleToGo core importPrefix env =
   fileImports =
     moduleNameToImport importPrefix . snd <$> filteredModuleImports core
 
-  fileDecls :: [Go.Decl]
-  fileDecls =
-    let ctx     = mkContext core
-        binds   = flattenBinds (CoreFn.moduleDecls core)
-    in  extractTypeDecls ctx binds <>
-          foldMap (bindToGo (initialScope ctx env) ctx) binds
+  fileDecls :: m [Go.Decl]
+  fileDecls = do
+    let ctx = mkContext core
+    let binds = flattenBinds (CoreFn.moduleDecls core)
+    let typeDecls = extractTypeDecls ctx binds
+    valueDecls <- traverse (bindToGo (initialScope ctx env) ctx) binds
+    pure (typeDecls <> mconcat valueDecls)
 
 
 -- | CoreFn.moduleImports with filtering.
+--
 filteredModuleImports
   :: CoreFn.Module CoreFn.Ann -> [(CoreFn.Ann, Names.ModuleName)]
-filteredModuleImports core = CoreFn.moduleImports core & filter
+filteredModuleImports core =
+  filter
   (\(_, mn) -> mn /= CoreFn.moduleName core && mn `notElem` Constants.primModules)
+  (CoreFn.moduleImports core)
 
 
 -- | Control.Monad -> import Control_Monad "dir/Control.Monad"
 --
 -- NOTE: can't have dots in import names.
 moduleNameToImport :: FilePath -> Names.ModuleName -> Go.Import
-moduleNameToImport dir mn =
-  Go.Import (Go.packageFromModuleName mn) (addDir dir (Names.runModuleName mn))
+moduleNameToImport dir mn = Go.Import {..}
+  where
+  importPackage :: Go.Package
+  importPackage = Go.packageFromModuleName mn
+
+  importPath :: Text
+  importPath = Text.pack (dir </> Text.unpack (Names.runModuleName mn))
 
 
 data Context = Context
@@ -105,9 +119,9 @@ initialScope ctx = foldl' folder Map.empty . Map.toList . Environment.names
 
 
 data Bind = Bind
-  { _bindAnn   :: CoreFn.Ann
-  , _bindIdent :: Names.Ident
-  , _bindExpr  :: CoreFn.Expr CoreFn.Ann
+  { _bindAnn  :: CoreFn.Ann
+  , bindIdent :: Names.Ident
+  , bindExpr  :: CoreFn.Expr CoreFn.Ann
   }
 
 
@@ -165,135 +179,91 @@ extractTypeDecls ctx = fmap (uncurry typeDecl) . Map.toList . typeMap
 {- TODO: Proper error handling -}
 
 
-bindToGo :: Scope -> Context -> Bind -> [Go.Decl]
-bindToGo scope ctx (Bind _ ident expr) = case expr of
-  CoreFn.Abs ann' arg body ->
-     case annType ann' of
-       Just (FunctionApp argType returnType') ->
-         let scope' = Map.insert (localIdent arg) (typeToGo ctx argType) scope
-             returnType = typeToGo ctx returnType'
-         in
-         [ Go.FuncDecl
-             (identToGo (moduleExports ctx) ident)
-             (localIdent arg, typeToGo ctx argType)
-             returnType
-             (Go.return . Go.typeAssert returnType $ exprToGo scope' ctx body)
-         ]
+-- | Convert a binding to a top-level Go declaration.
+--
+bindToGo :: Monad m => Scope -> Context -> Bind -> m [Go.Decl]
+bindToGo scope ctx bind = case bindExpr bind of
+
+  -- Top level abstractions become func declarations
+  CoreFn.Abs ann arg' body' ->
+     case annType ann of
+       Just (FunctionApp argType' returnType') -> do
+         let arg = localIdent arg'
+         let argType = typeToGo ctx argType'
+         let returnType = typeToGo ctx returnType'
+         body <- exprToGo (Map.insert arg argType scope) ctx body'
+
+         let funcDecl = Go.FuncDecl
+               (identToGo (moduleExports ctx) (bindIdent bind))
+               (arg, argType)
+               returnType
+               (Go.return $ Go.typeAssert returnType body)
+
+         pure [ funcDecl ]
+
        Just _  -> undefined
        Nothing -> undefined
 
-  CoreFn.Constructor _ann typeName ctorName [] ->
-    let typeIdent = typeNameIdent ctx typeName in
-    [ Go.VarDecl
-        (ctorNameIdent ctx ctorName)
-        (Go.NamedType typeIdent)
-        (Go.LiteralExpr $ Go.NamedStructLiteral
-          typeIdent
-          [ ( ctorNameIdent ctx ctorName
-            , Go.ReferenceExpr Go.emptyStructLiteral
-            )
-          ]
-        )
-    ]
+  -- Nullary data constructors become var declarations
+  -- (because we only need one instance of them)
+  CoreFn.Constructor _ann typeName' ctorName' [] -> do
+    let ctorName = ctorNameIdent ctx ctorName'
+    let typeName = typeNameIdent ctx typeName'
+    let literal = Go.NamedStructLiteral typeName [(ctorName, Go.emptyStructReference)]
 
+    pure [ Go.VarDecl ctorName (Go.NamedType typeName) (Go.LiteralExpr literal) ]
+
+  -- Non-nullary data constructors become func declarations
   CoreFn.Constructor _ann typeName ctorName (value : values ) ->
-    [ constructorFunc ctx typeName ctorName (value :| values) ]
+    singleton <$> constructorToGo ctx typeName ctorName (value :| values)
 
-  _ ->
+  -- Anything else becomes a var declaration
+  expr ->
     case typeToGo ctx <$> annType (CoreFn.extractAnn expr) of
-      Just varType ->
-        [ Go.VarDecl
-            (identToGo (moduleExports ctx) ident)
-             varType
-            (Go.typeAssert varType $ exprToGo scope ctx expr)
-        ]
+      Just varType -> do
+        let varName = identToGo (moduleExports ctx) (bindIdent bind)
+        varValue <- exprToGo scope ctx expr
+        pure [ Go.VarDecl varName varType (Go.typeAssert varType varValue) ]
 
       -- XXX
       Nothing -> error (show expr)
 
 
-constructorFunc
-  :: Context
-  -> Names.ProperName 'Names.TypeName
-  -> Names.ProperName 'Names.ConstructorName
-  -> NonEmpty Names.Ident
-  -> Go.Decl
-constructorFunc ctx typeName ctorName (value :| values) =
-  Go.FuncDecl
-    (identToGo (moduleExports ctx) (unCtorName ctorName))
-    (localIdent value, Go.EmptyInterfaceType)
-    `uncurry`
-    (Go.return <$> go values)
-  where
-  go :: [Names.Ident] -> (Go.Type, Go.Expr)
-  go [] =
-    ( Go.NamedType (typeNameIdent ctx typeName)
-    , Go.LiteralExpr $ Go.NamedStructLiteral
-        (typeNameIdent ctx typeName)
-        [ ( ctorNameIdent ctx ctorName
-          , Go.ReferenceExpr . Go.LiteralExpr $
-              Go.StructLiteral
-                (fmap (\value' ->
-                   ( if isExported ctx (unCtorName ctorName)
-                        then publicIdent value'
-                        else privateIdent value'
-                   , Go.EmptyInterfaceType
-                   ))
-                   (value : values))
-                (fmap (\value' ->
-                   ( if isExported ctx (unCtorName ctorName)
-                        then publicIdent value'
-                        else privateIdent value'
-                   , Go.VarExpr Go.EmptyInterfaceType
-                       (localIdent value')
-                   ))
-                   (value : values))
-          )
-        ]
-    )
-
-  go (ctor' : rest) =
-    let (gotype, expr) = go rest in
-    ( Go.FuncType Go.EmptyInterfaceType gotype
-    , Go.AbsExpr
-        (localIdent ctor', Go.EmptyInterfaceType)
-         gotype
-        (Go.return expr)
-    )
-
-
 exprToGo
-  :: Scope
+  :: Monad m
+  => Scope
   -> Context
   -> CoreFn.Expr CoreFn.Ann
-  -> Go.Expr
+  -> m Go.Expr
 exprToGo scope ctx = \case
   CoreFn.Literal ann literal ->
-    Go.LiteralExpr (literalToGo scope ctx ann literal)
+    Go.LiteralExpr <$> literalToGo scope ctx ann literal
 
-  CoreFn.Abs ann arg body ->
+  CoreFn.Abs ann arg' body' ->
     case annType ann of
-      Just (FunctionApp argType returnType) ->
-        let scope' = Map.insert (localIdent arg) (typeToGo ctx argType) scope in
-        Go.AbsExpr
-          (localIdent arg, typeToGo ctx argType)
-          (typeToGo ctx returnType)
-          (Go.return $ exprToGo scope' ctx body)
+      Just (FunctionApp argType' returnType') -> do
+        let arg = localIdent arg'
+        let argType = typeToGo ctx argType'
+        let returnType = typeToGo ctx returnType'
+        body <- exprToGo (Map.insert arg argType scope) ctx body'
+
+        pure (Go.AbsExpr (arg, argType) returnType (Go.return body))
 
       Just _  -> undefined
 
       Nothing -> undefined
 
   CoreFn.App _ann lhs rhs ->
-    Go.AppExpr (exprToGo scope ctx lhs) (exprToGo scope ctx rhs)
+    Go.AppExpr
+      <$> exprToGo scope ctx lhs
+      <*> exprToGo scope ctx rhs
 
-  -- TODO: Look at the CoreFn.Meta and case accordingly.
-  expr@(CoreFn.Var ann name) ->
-    let ident = qualifiedIdentToGo ctx name in
-
+  -- TODO: Look at the meta and case accordingly.
+  expr@(CoreFn.Var ann name) -> do
+    let ident = qualifiedIdentToGo ctx name
     case Map.lookup ident scope <|> (typeToGo ctx <$> annType ann) of
       Just t ->
-        Go.VarExpr t ident
+        pure $ Go.VarExpr t ident
 
       _ ->
         error ("no type for " <> show name <> "\n\n" <>
@@ -306,79 +276,84 @@ exprToGo scope ctx = \case
     letToGo scope ctx binds expr
 
   -- XXX
-  expr -> Go.TodoExpr (show expr)
+  expr -> pure (Go.TodoExpr (show expr))
 
 
--- | TODO: Need to magic some type information here.
 caseToGo
-  :: Scope
+  :: forall m. Monad m
+  => Scope
   -> Context
   -> CoreFn.Ann
   -> [CoreFn.Expr CoreFn.Ann]
   -> [CoreFn.CaseAlternative CoreFn.Ann]
-  -> Go.Expr
-caseToGo scope ctx ann = (Go.BlockExpr .) . go
-  --         ^^^ NOTE: Annotation here gives us the result type
+  -> m Go.Expr
+caseToGo scope ctx ann patterns' alternatives =
+  --               ^^^ NOTE: Annotation here gives us the result type
+  Go.BlockExpr <$> go patterns' alternatives
   where
-  go :: [CoreFn.Expr CoreFn.Ann] -> [CoreFn.CaseAlternative CoreFn.Ann] -> Go.Block
+  go :: [CoreFn.Expr CoreFn.Ann] -> [CoreFn.CaseAlternative CoreFn.Ann] -> m Go.Block
   go _ [] =
-    Go.panic (maybe undefined (typeToGo ctx) (annType ann))
-      "Failed pattern match"
+    pure $ Go.panic (maybe undefined (typeToGo ctx) (annType ann)) "Failed pattern match"
 
-  go exprs (CoreFn.CaseAlternative binders result : rest) =
-    let (conditions, substitutions) =
-          zipFoldWith (binderToGo scope ctx) (Right <$> exprs) binders
+  go patterns (CoreFn.CaseAlternative caseBinders caseResult : rest) = do
+    (conditions, substitutions) <-
+      fold <$> zipWithM (binderToGo scope ctx) (Right <$> patterns) caseBinders
 
-        substitute :: Go.Expr -> Go.Expr
+    let substitute :: Go.Expr -> Go.Expr
         substitute expr =
           foldr ($) expr (uncurry Go.substituteVar <$> substitutions)
-    in
-    case result of
-      Left guardedExprs ->
-        foldl'
-          (\accum (guard, expr) ->
-              Go.ifElse
-                (foldConditions (substitute <$> snoc conditions (exprToGo scope ctx guard)))
-                (Go.return . substitute $ exprToGo scope ctx expr)
+
+    block <- go patterns rest
+
+    case caseResult of
+      Left guardedResults ->
+        foldM
+          (\accum (guard', result') -> do
+              expr <- substitute <$> exprToGo scope ctx result'
+              guard <- exprToGo scope ctx guard'
+              pure $ Go.ifElse
+                (conjunction (substitute <$> snoc conditions guard))
+                (Go.return expr)
                 accum
           )
-          (go exprs rest)
-          guardedExprs
+          block
+          guardedResults
 
-      Right expr ->
-        Go.ifElse
-          (foldConditions (substitute <$> conditions))
-          (Go.return . substitute $ exprToGo scope ctx expr)
-          (go exprs rest)
+      Right result' -> do
+        result <- substitute <$> exprToGo scope ctx result'
+        pure $ Go.ifElse
+          (conjunction (substitute <$> conditions))
+          (Go.return result)
+          block
 
-  foldConditions :: [Go.Expr] -> Go.Expr
-  foldConditions [] = Go.true
-  foldConditions [b] = b
-  foldConditions (b : bs) = b `Go.and` foldConditions bs
+  conjunction :: [Go.Expr] -> Go.Expr
+  conjunction [] = Go.true  -- NOTE: this should be optimized away
+  conjunction [b] = b
+  conjunction (b : bs) = b `Go.and` conjunction bs
 
 
--- | Returns conditions and substitutions.
+-- | Returns conditions and var substitutions.
 --
 binderToGo
-  :: Scope
+  :: Monad m
+  => Scope
   -> Context
   -> Either Go.Expr (CoreFn.Expr CoreFn.Ann)
   -> CoreFn.Binder CoreFn.Ann
-  -> ([Go.Expr], [(Go.Ident, Go.Expr)])
+  -> m ([Go.Expr], [(Go.Ident, Go.Expr)])
 binderToGo scope ctx expr = \case
   CoreFn.NullBinder{} ->
-    mempty
+    pure mempty
 
   CoreFn.VarBinder _ann ident ->
-   substitution (localIdent ident)
-     (either id (exprToGo scope ctx) expr)
+    substitution (localIdent ident) <$> either pure (exprToGo scope ctx) expr
 
   CoreFn.LiteralBinder _ann literal ->
     literalBinderToGo scope ctx expr literal
 
   CoreFn.ConstructorBinder ann _typeName ctorName' binders ->
     case ann of
-      (_, _, _, Just (CoreFn.IsConstructor _ idents')) ->
+      (_, _, _, Just (CoreFn.IsConstructor _ idents')) -> do
         let idents :: [Go.Ident]
             idents =
               case ctorName' of
@@ -390,32 +365,29 @@ binderToGo scope ctx expr = \case
                   | otherwise ->
                      privateIdent <$> idents'
 
-            ctorName :: Go.Ident
+        let ctorName :: Go.Ident
             ctorName = qualifiedCtorNameIdent ctx ctorName'
 
-            constructType :: Go.Type
+        let constructType :: Go.Type
             constructType =
               -- Bit of a wierd hack this...
               Go.StructType . singleton $
-                ( ctorName
-                , Go.StructType (fmap (,Go.EmptyInterfaceType) idents)
-                )
+                ( ctorName, Go.StructType (fmap (,Go.EmptyInterfaceType) idents))
 
-            construct :: Go.Expr
-            construct =
-              Go.StructAccessorExpr
-                (case either id (exprToGo scope ctx) expr of
-                   Go.VarExpr _ ident -> Go.VarExpr constructType ident
-                   other -> other
-                )
-                ctorName
-        in
-        condition (Go.notNil construct) <>
-            zipFoldWith
-              (\ident -> binderToGo scope ctx
-                  (Left $ Go.StructAccessorExpr construct ident))
-              idents
-              binders
+        construct <-
+          either pure (exprToGo scope ctx) expr <&> \case
+            Go.VarExpr _ ident ->
+              Go.StructAccessorExpr (Go.VarExpr constructType ident) ctorName
+            other ->
+              Go.StructAccessorExpr other ctorName
+
+        mappend (condition (Go.notNil construct)) . fold <$>
+          zipWithM
+            (\ident binder ->
+                binderToGo scope ctx
+                  (Left $ Go.StructAccessorExpr construct ident) binder
+            )
+            idents binders
 
       _ ->
         undefined
@@ -424,6 +396,7 @@ binderToGo scope ctx expr = \case
     undefined
 
   where
+  -- Readability helpers:
   condition :: Go.Expr -> ([Go.Expr], [(Go.Ident, Go.Expr)])
   condition e = ([e], [])
 
@@ -432,16 +405,17 @@ binderToGo scope ctx expr = \case
 
 
 literalBinderToGo
-  :: Scope
+  :: Monad m
+  => Scope
   -> Context
   -> Either Go.Expr (CoreFn.Expr CoreFn.Ann)
   -> Literals.Literal (CoreFn.Binder CoreFn.Ann)
-  -> ([Go.Expr], [(Go.Ident, Go.Expr)])
+  -> m ([Go.Expr], [(Go.Ident, Go.Expr)])
 literalBinderToGo scope ctx expr = \case
-  Literals.NumericLiteral (Left integer) ->
-    condition $
-      either id (exprToGo scope ctx) expr
-        `Go.eq` Go.LiteralExpr (Go.IntLiteral integer)
+  Literals.NumericLiteral (Left integer) -> do
+    let want = Go.LiteralExpr (Go.IntLiteral integer)
+    got <- either pure (exprToGo scope ctx) expr
+    pure $ condition (got `Go.eq` want)
 
   _ ->
     undefined
@@ -451,53 +425,41 @@ literalBinderToGo scope ctx expr = \case
   condition e = ([e], [])
 
 
-letToGo    -- let it go, let it gooo
-  :: Scope
-  -> Context
-  -> [CoreFn.Bind CoreFn.Ann]
-  -> CoreFn.Expr CoreFn.Ann
-  -> Go.Expr
-letToGo scope ctx binds expr = go (flattenBinds binds)
-  where
-  go :: [Bind] -> Go.Expr
-  go [] = exprToGo scope ctx expr
-  go (Bind _ ident value : rest) =
-    Go.letExpr (localIdent ident) (exprToGo scope ctx value) (go rest)
-
-
 literalToGo
-  :: Scope
+  :: Monad m
+  => Scope
   -> Context
   -> CoreFn.Ann
   -> Literals.Literal (CoreFn.Expr CoreFn.Ann)
-  -> Go.Literal
+  -> m Go.Literal
 literalToGo scope ctx ann = \case
   Literals.NumericLiteral (Left integer) ->
-    Go.IntLiteral integer
+    pure $ Go.IntLiteral integer
 
   Literals.NumericLiteral (Right double) ->
-    Go.FloatLiteral double
+    pure $ Go.FloatLiteral double
 
   Literals.StringLiteral psString ->
-    Go.StringLiteral (showT psString)
+    pure $ Go.StringLiteral (showT psString)
 
   Literals.CharLiteral char ->
-    Go.CharLiteral char
+    pure $ Go.CharLiteral char
 
   Literals.BooleanLiteral bool ->
-    Go.BoolLiteral bool
+    pure $ Go.BoolLiteral bool
 
   Literals.ArrayLiteral items ->
     case typeToGo ctx <$> annType ann of
       Just (Go.SliceType itemType) ->
-        Go.SliceLiteral itemType (exprToGo scope ctx <$> items)
+        Go.SliceLiteral itemType <$> traverse (exprToGo scope ctx) items
       Just _ ->
         undefined
       Nothing ->
         undefined
 
   Literals.ObjectLiteral keyValues ->
-    Go.objectLiteral (bimap showT (exprToGo scope ctx) <$> keyValues)
+    Go.objectLiteral <$>
+      traverse (sequence . bimap showT (exprToGo scope ctx)) keyValues
 
 
 typeToGo :: Context -> Types.Type -> Go.Type
@@ -540,6 +502,74 @@ typeToGo ctx = \case
 
   -- XXX
   ty -> Go.UnknownType (show ty)
+
+
+letToGo    -- let it go, let it gooo
+  :: forall m. Monad m
+  => Scope
+  -> Context
+  -> [CoreFn.Bind CoreFn.Ann]
+  -> CoreFn.Expr CoreFn.Ann
+  -> m Go.Expr
+letToGo scope ctx binds expr = go (flattenBinds binds)
+  where
+  go :: [Bind] -> m Go.Expr
+  go [] = exprToGo scope ctx expr
+  go (Bind _ ident value : rest) =
+    Go.letExpr (localIdent ident)
+      <$> exprToGo scope ctx value
+      <*> go rest
+
+
+constructorToGo
+  :: forall m. Monad m
+  => Context
+  -> Names.ProperName 'Names.TypeName
+  -> Names.ProperName 'Names.ConstructorName
+  -> NonEmpty Names.Ident
+  -> m Go.Decl
+constructorToGo ctx typeName ctorName (value :| values) = do
+  (returnType, body) <- go values
+  pure $ Go.FuncDecl
+    (identToGo (moduleExports ctx) (unCtorName ctorName))
+    (localIdent value, Go.EmptyInterfaceType)
+    returnType
+    (Go.return body)
+  where
+  go :: [Names.Ident] -> m (Go.Type, Go.Expr)
+  go [] = pure
+    ( Go.NamedType (typeNameIdent ctx typeName)
+    , Go.LiteralExpr $ Go.NamedStructLiteral
+        (typeNameIdent ctx typeName)
+        [ ( ctorNameIdent ctx ctorName
+          , Go.ReferenceExpr . Go.LiteralExpr $
+              Go.StructLiteral
+                (fmap (\value' ->
+                   ( if isExported ctx (unCtorName ctorName)
+                        then publicIdent value'
+                        else privateIdent value'
+                   , Go.EmptyInterfaceType
+                   ))
+                   (value : values))
+                (fmap (\value' ->
+                   ( if isExported ctx (unCtorName ctorName)
+                        then publicIdent value'
+                        else privateIdent value'
+                   , Go.VarExpr Go.EmptyInterfaceType
+                       (localIdent value')
+                   ))
+                   (value : values))
+          )
+        ]
+    )
+  go (ctor' : rest) =
+    go rest <&> \(gotype, expr) ->
+      ( Go.FuncType Go.EmptyInterfaceType gotype
+      , Go.AbsExpr
+          (localIdent ctor', Go.EmptyInterfaceType)
+           gotype
+          (Go.return expr)
+      )
 
 
 -- IDENTIFIERS
@@ -627,18 +657,8 @@ unTypeApp (Types.TypeApp a b) = unTypeApp a <> unTypeApp b
 unTypeApp t = [t]
 
 
--- | Add a directory name to a file path.
---
-addDir :: FilePath -> Text -> Text
-addDir dir base = Text.pack (dir </> Text.unpack base)
-
-
 showT :: Show a => a -> Text
 showT = Text.pack . show
-
-
-zipFoldWith :: Monoid c => (a -> b -> c) -> [a] -> [b] -> c
-zipFoldWith f as bs = fold (zipWith f as bs)
 
 
 singleton :: a -> [a]
