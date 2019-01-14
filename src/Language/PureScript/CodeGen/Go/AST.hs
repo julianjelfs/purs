@@ -372,10 +372,10 @@ typeAssert want expr = case expr of
           (typeAssert (BasicType BoolType) rhs)
 
       EqOp lhs rhs ->
-        uncurry NEqOp (typeAssertBinOp lhs rhs)
+        uncurry EqOp (typeAssertBinOp lhs rhs)
 
       NEqOp lhs rhs ->
-        uncurry EqOp (typeAssertBinOp lhs rhs)
+        uncurry NEqOp (typeAssertBinOp lhs rhs)
 
   -- XXX
   TodoExpr{} -> expr
