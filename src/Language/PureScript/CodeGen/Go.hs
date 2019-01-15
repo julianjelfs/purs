@@ -7,6 +7,7 @@ import Prelude.Compat
 
 import qualified Data.Text as Text
 import qualified Data.Map as Map
+import qualified Data.List as List
 import qualified Control.Monad.Reader as Reader
 import qualified Language.PureScript.CodeGen.Go.AST as Go
 import qualified Language.PureScript.CodeGen.Go.Optimizer as Optimizer
@@ -21,11 +22,14 @@ import Control.Monad (foldM, zipWithM)
 import Control.Monad.Reader (MonadReader)
 import System.FilePath.Posix ((</>))
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Functor ((<&>))
 import Data.Function ((&))
 import Data.Foldable (fold)
+import Data.Bool (bool)
 import Data.Bifunctor (bimap)
+import Data.Traversable (for)
 import Language.PureScript.CodeGen.Go.Plumbing as Plumbing
 
 
@@ -33,8 +37,7 @@ moduleToGo
   :: forall m. Monad m
   => Environment.Environment
   -> CoreFn.Module CoreFn.Ann
-  -> FilePath
-  -- ^ Import path prefix (e.g. goModuleName/outputDir)
+  -> FilePath  -- ^ Import path prefix (e.g. goModuleName/outputDir)
   -> m Go.File
 moduleToGo env core@CoreFn.Module{..} importPrefix =
   Optimizer.optimize . Go.File filePackage fileImports <$> fileDecls
@@ -49,14 +52,12 @@ moduleToGo env core@CoreFn.Module{..} importPrefix =
 
   fileDecls :: m [Go.Decl]
   fileDecls = do
-    let context = mkContext env core
+    context <- mkContext env core
     flip Reader.runReaderT context $ do
       let binds = flattenBinds (CoreFn.moduleDecls core)
-      --let typeDecls = extractTypeDecls ctx binds
-      --scope <- initialScope ctx env
+      typeDecls <- extractTypeDecls binds
       valueDecls <- traverse bindToGo binds
-      --pure (typeDecls <> mconcat valueDecls)
-      pure (mconcat valueDecls)
+      pure (typeDecls <> mconcat valueDecls)
 
 
 filterModuleImports
@@ -64,7 +65,7 @@ filterModuleImports
   -> [(CoreFn.Ann, Names.ModuleName)]
   -> [(CoreFn.Ann, Names.ModuleName)]
 filterModuleImports moduleName =
-  filter (\(_, mn) -> mn /= moduleName && mn `notElem` Constants.primModules)
+  filter $ \(_, mn) -> mn /= moduleName && mn `notElem` Constants.primModules
 
 
 -- | Control.Monad -> import Control_Monad "dir/Control.Monad"
@@ -86,52 +87,46 @@ data Context = Context
   }
 
 
-mkContext :: Environment.Environment -> CoreFn.Module CoreFn.Ann -> Context
-mkContext _ coreModule = Context coreModule Map.empty
+mkContext
+  :: forall m. Monad m
+  => Environment.Environment
+  -> CoreFn.Module CoreFn.Ann
+  -> m Context
+mkContext env core@CoreFn.Module{..} =
+  Context core { CoreFn.moduleExports = moduleExports' } <$> initialTypes
+  where
+  moduleExports' :: [Names.Ident]
+  moduleExports' = moduleExports <> exportedTypeNames
+
+  exportedTypeNames :: [Names.Ident]
+  exportedTypeNames =
+    List.nub . fmap (Names.Ident . unTypeName) . mapMaybe getExportedTypeName $
+      flattenBinds moduleDecls
+    where
+    getExportedTypeName :: Bind -> Maybe (Names.ProperName 'Names.TypeName)
+    getExportedTypeName (Bind _ ident expr) = case expr of
+      CoreFn.Constructor _ typeName _ _
+        | ident `elem` moduleExports -> Just typeName
+      _ -> Nothing
+
+  initialTypes :: m (Map.Map (Go.Qualified Go.Ident) Go.Type)
+  initialTypes = foldM go Map.empty (Map.toList $ Environment.names env)
+    where
+    go accum (ident', (t', _, _)) = do
+      let ident = qualifiedToGo' moduleName moduleExports ident'
+      t <- typeToGo' moduleName moduleExports t'
+      pure (Map.insert ident t accum)
+
+
+isExported :: MonadReader Context m => Names.Ident -> m Bool
+isExported ident = do
+  exports <- Reader.asks (CoreFn.moduleExports . ctxModule)
+  pure (ident `elem` exports)
 
 
 withType :: MonadReader Context m => Go.Qualified Go.Ident -> Go.Type -> m a -> m a
 withType ident t =
   Reader.local (\ctx -> ctx { ctxTypes = Map.insert ident t (ctxTypes ctx) })
-
-
---data Context = Context
---    { currentModule :: Names.ModuleName
---    , moduleExports :: [Names.Ident]
---    }
---
---
---mkContext :: CoreFn.Module CoreFn.Ann -> Context
---mkContext CoreFn.Module {..} =
---  Context moduleName
---    (moduleExports <> fmap (Names.Ident . unTypeName) exportedTypeNames)
---  where
---  exportedTypeNames :: [Names.ProperName 'Names.TypeName]
---  exportedTypeNames = mapMaybe getExportedTypeName (flattenBinds moduleDecls)
---
---  getExportedTypeName :: Bind -> Maybe (Names.ProperName 'Names.TypeName)
---  getExportedTypeName (Bind _ ident expr) = case expr of
---    CoreFn.Constructor _ typeName _ _
---      | ident `elem` moduleExports -> Just typeName
---    _ -> Nothing
---
---
---isExported :: Context -> Names.Ident -> Bool
---isExported (Context _ exports) = flip elem exports
---
---
---type Scope = Map.Map Go.Ident Go.Type
---
---
---initialScope :: forall m. Monad m => Context -> Environment.Environment -> m Scope
---initialScope ctx = foldM folder Map.empty . Map.toList . Environment.names
---  where
---  folder
---    :: Scope -> (Names.Qualified Names.Ident, (Types.Type, a, b)) -> m Scope
---  folder accum (qualifiedIdent, (t', _, _)) = do
---    let ident = undefined ctx qualifiedIdent
---    t <- typeToGo ctx t'
---    pure (Map.insert ident t accum)
 
 
 data Bind = Bind
@@ -154,42 +149,39 @@ flattenBind = \case
     uncurry (uncurry Bind) <$> rec
 
 
---extractTypeDecls :: Context -> [Bind] -> [Go.Decl]
---extractTypeDecls ctx = fmap (uncurry typeDecl) . Map.toList . typeMap
---  where
---  typeMap [] = Map.empty
---  typeMap (Bind _ _ expr : rest) =
---    case expr of
---      CoreFn.Constructor _ann typeName ctorName values ->
---        Map.insertWith (<>) typeName [(ctorName, values)] (typeMap rest)
---      _ ->
---        typeMap rest
---
---  typeDecl
---    :: Names.ProperName 'Names.TypeName
---    -> [(Names.ProperName 'Names.ConstructorName, [Names.Ident])]
---    -> Go.Decl
---  typeDecl typeName =
---    Go.TypeDecl (undefined ctx typeName) .
---      Go.StructType . fmap (uncurry constructorToField)
---
---  constructorToField
---    :: Names.ProperName 'Names.ConstructorName
---    -> [Names.Ident]
---    -> Go.Field
---  constructorToField ctorName values =
---    ( undefined ctx ctorName
---    , Go.PointerType . Go.StructType $
---        fmap
---        (\value ->
---            ( if isExported ctx (Names.Ident $ unConstructorName ctorName)
---                 then publicIdent value
---                 else privateIdent value
---            , Go.EmptyInterfaceType
---            )
---        )
---        values
---    )
+extractTypeDecls :: forall m. MonadReader Context m => [Bind] -> m [Go.Decl]
+extractTypeDecls binds =
+  traverse (uncurry mkTypeDecl) $
+    Map.toList (typesFromExprs (bindExpr <$> binds))
+  where
+  typesFromExprs [] = Map.empty
+  typesFromExprs (expr : rest) =
+    case expr of
+      CoreFn.Constructor _ann typeName ctorName values ->
+        Map.insertWith (<>) typeName [(ctorName, values)] (typesFromExprs rest)
+
+      _ ->
+        typesFromExprs rest
+
+  mkTypeDecl
+    :: Names.ProperName 'Names.TypeName
+    -> [(Names.ProperName 'Names.ConstructorName, [Names.Ident])]
+    -> m Go.Decl
+  mkTypeDecl typeName' ctors = do
+    structName <- typeNameToGo typeName'
+    structFields <- traverse (uncurry constructorToField) ctors
+    pure (Go.TypeDecl structName (Go.StructType structFields))
+    where
+    constructorToField
+      :: Names.ProperName 'Names.ConstructorName
+      -> [Names.Ident]
+      -> m Go.Field
+    constructorToField ctorName values = do
+      fieldIdent <- constructorNameToGo ctorName
+      fieldValueTypes <- for values $ \value -> do
+        exported <- isExported (Names.Ident $ unConstructorName ctorName)
+        pure (bool privateIdent publicIdent exported value, Go.EmptyInterfaceType)
+      pure (fieldIdent, Go.PointerType (Go.StructType fieldValueTypes))
 
 
 {- TODO: Proper error handling -}
@@ -456,8 +448,8 @@ literalToGo ann = \case
   Literals.CharLiteral char ->
     pure $ Go.CharLiteral char
 
-  Literals.BooleanLiteral bool ->
-    pure $ Go.BoolLiteral bool
+  Literals.BooleanLiteral b ->
+    pure $ Go.BoolLiteral b
 
   Literals.ArrayLiteral items ->
     withMaybeM typeToGo (annType ann) >>= \case
@@ -502,19 +494,19 @@ typeToGo' moduleName moduleExports = \case
     typeToGo' moduleName moduleExports t
 
   Prim "Boolean" ->
-    pure $ Go.BasicType Go.BoolType
+    pure (Go.BasicType Go.BoolType)
 
   Prim "Int" ->
-    pure $ Go.BasicType Go.IntType
+    pure (Go.BasicType Go.IntType)
 
   Prim "Number" ->
-    pure $ Go.BasicType Go.Float64Type
+    pure (Go.BasicType Go.Float64Type)
 
   Prim "String" ->
-    pure $ Go.BasicType Go.StringType
+    pure (Go.BasicType Go.StringType)
 
   Prim "Char" ->
-    pure $ Go.BasicType Go.RuneType -- ???
+    pure (Go.BasicType Go.RuneType) -- ???
 
   Types.TypeVar{} ->
     pure Go.EmptyInterfaceType
@@ -545,8 +537,7 @@ typeToGo' moduleName moduleExports = \case
   unsupportedType -> undefined unsupportedType
 
 
-
-letToGo    -- let it go, let it gooo
+letToGo
   :: forall m. MonadReader Context m
   => [CoreFn.Bind CoreFn.Ann]
   -> CoreFn.Expr CoreFn.Ann
@@ -622,11 +613,11 @@ identToGo' moduleExports ident
   | otherwise = privateIdent ident
 
 
-qualifiedToGo
+_qualifiedToGo
   :: MonadReader Context m
   => Names.Qualified Names.Ident
   -> m (Go.Qualified Go.Ident)
-qualifiedToGo qualifiedIdent = do
+_qualifiedToGo qualifiedIdent = do
   currentModule <- Reader.asks (CoreFn.moduleName . ctxModule)
   moduleExports <- Reader.asks (CoreFn.moduleExports . ctxModule)
   pure (qualifiedToGo' currentModule moduleExports qualifiedIdent)
