@@ -108,7 +108,7 @@ printGoExpr = \case
         printGoExpr lhs <> "(" <> printGoExpr rhs <> ")"
 
   Go.VarExpr _ ident ->
-    printGoIdent ident
+    printGoQualifiedIdent ident
 
   Go.BlockExpr block ->
     "(func() " <> printGoType (Go.getBlockType block) <> "{\n" <> printGoBlock block <> "})()"
@@ -121,9 +121,6 @@ printGoExpr = \case
 
   Go.DereferenceExpr expr ->
     "*" <> printGoExpr expr
-
-  Go.StructAccessorExpr expr (Go.ImportedIdent _ ident) ->
-    printGoExpr expr <> "." <> printGoIdent (Go.VisibleIdent Go.Public ident)
 
   Go.StructAccessorExpr expr ident ->
     printGoExpr expr <> "." <> printGoIdent ident
@@ -176,7 +173,7 @@ printGoLiteral = \case
 
   Go.NamedStructLiteral ident keyvalues ->
     Text.concat
-      [ printGoIdent ident, "{"
+      [ printGoQualifiedIdent ident, "{"
       , Text.intercalate "," (printGoKeyValue printGoIdent <$> keyvalues)
       , "}"
       ]
@@ -203,7 +200,7 @@ printGoType = \case
     "interface{}"
 
   Go.NamedType name ->
-    printGoIdent name
+    printGoQualifiedIdent name
 
   Go.PointerType gotype ->
     "*" <> printGoType gotype
@@ -271,16 +268,26 @@ printGoField :: Go.Field -> Text
 printGoField (ident, gotype) = printGoIdent ident <> " " <> printGoType gotype
 
 
+printGoQualifiedIdent :: Go.Qualified Go.Ident -> Text
+printGoQualifiedIdent = \case
+  Go.Qualified Nothing ident ->
+    printGoIdent ident
+
+  Go.Qualified (Just package) ident ->
+    printGoPackage package <> "." <> printGoIdent ident
+
+
 printGoIdent :: Go.Ident -> Text
 printGoIdent = sanitise . \case
-  Go.VisibleIdent Go.Public ident ->
+  Go.PublicIdent ident ->
     mkPublic ident
-  Go.VisibleIdent Go.Private ident ->
+
+  Go.PrivateIdent ident ->
     mkPrivate ident
-  Go.ImportedIdent package ident ->
-    printGoPackage package <> "." <> mkPublic ident
+
   Go.LocalIdent ident ->
     fixKeywords ident
+
   where
   mkPublic :: Text -> Text
   mkPublic = ("Public_" <>)

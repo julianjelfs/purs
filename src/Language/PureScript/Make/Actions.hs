@@ -182,7 +182,7 @@ buildMakeActions outputDir filePathMap foreigns usePrefix =
         when sourceMaps $ genSourceMap dir mapFile (length prefix) mappings
     when (S.member Go codegenTargets) $ do
       let importPrefix = T.unpack (Go.modFileModule Go.defaultModFile)
-      rawGo <- Go.moduleToGo m (importPrefix </> outputDir) env
+      rawGo <- Go.moduleToGo env m (importPrefix </> outputDir)
       let go = printGo rawGo
           goFile = targetFilename mn Go
       lift (writeTextFile goFile (B.fromStrict $ TE.encodeUtf8 $ go))

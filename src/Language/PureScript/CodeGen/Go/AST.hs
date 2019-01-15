@@ -13,7 +13,7 @@ module Language.PureScript.CodeGen.Go.AST
   , Type(..)
   , BasicType(..)
   , Ident(..)
-  , Visibility(..)
+  , Qualified(..)
   , KeyValue
   , Field
   , unPackage
@@ -36,7 +36,6 @@ module Language.PureScript.CodeGen.Go.AST
   , notNil
   , letExpr
   , substituteVar
-  , mapIdent
   ) where
 
 import Prelude.Compat hiding (return, and)
@@ -96,7 +95,7 @@ data Type
   | SliceType Type          -- ^ []item
   | MapType Type Type       -- ^ map[key]value
   | EmptyInterfaceType      -- ^ this gives us crude polymorphism
-  | NamedType Ident
+  | NamedType (Qualified Ident)
   | PointerType Type
   | PanicType Type
   | NilType Type
@@ -202,7 +201,7 @@ data Expr
   = LiteralExpr Literal
   | BooleanOpExpr BooleanOp
   | AbsExpr Field Type Block       -- ^ function abstraction: func(foo int) int { ... }
-  | VarExpr Type Ident             -- ^ foo
+  | VarExpr Type (Qualified Ident) -- ^ foo
   | AppExpr Expr Expr              -- ^ function application: foo(bar)
   | BlockExpr Block                -- ^ (func() int { ...})()
   | TypeAssertExpr Type Expr       -- ^ foo.(int)
@@ -256,7 +255,7 @@ data Literal
   | SliceLiteral Type [Expr]
   | MapLiteral Type Type [KeyValue Expr]
   | StructLiteral [Field] [KeyValue Ident]
-  | NamedStructLiteral Ident [KeyValue Ident]
+  | NamedStructLiteral (Qualified Ident) [KeyValue Ident]
   deriving (Show, Eq)
 
 
@@ -408,7 +407,7 @@ wrapFunc expr = go []
     argIdent = LocalIdent ("v" <> Text.pack (show $ length vars))
 
     argVar :: Expr
-    argVar = VarExpr argType argIdent
+    argVar = VarExpr argType (Qualified Nothing argIdent)
 
   -- Shouldn't really get here...
   go _ _ = expr
@@ -434,7 +433,7 @@ objectType :: Type
 objectType = MapType (BasicType StringType) EmptyInterfaceType
 
 
-substituteVar :: Ident -> Expr -> Expr -> Expr
+substituteVar :: Qualified Ident -> Expr -> Expr -> Expr
 substituteVar ident sub = go
   where
   go :: Expr -> Expr
@@ -489,26 +488,14 @@ type Field = (Ident, Type)
 
 
 -- IDENTIFIERS
---
--- NOTE: Go exports identifiers that being with a Capital letter. There is no
--- explicit export list as in Haskell or Javascript.
 
 
 data Ident
-  = VisibleIdent Visibility Text -- ^ Top level binding, struct field
-  | ImportedIdent Package Text   -- ^ fmt.Sprintf
-  | LocalIdent Text              -- ^ foo
+  = LocalIdent Text
+  | PublicIdent Text
+  | PrivateIdent Text
   deriving (Show, Eq, Ord)
 
 
-data Visibility
-  = Public    -- ^ Public
-  | Private   -- ^ private
-  deriving (Show, Eq, Ord)
-
-
-mapIdent :: (Text -> Text) -> Ident -> Ident
-mapIdent f = \case
-  VisibleIdent visibility text -> VisibleIdent visibility (f text)
-  ImportedIdent package text   -> ImportedIdent package (f text)
-  LocalIdent text              -> LocalIdent (f text)
+data Qualified a = Qualified (Maybe Package) a
+  deriving (Show, Eq, Ord, Functor)
