@@ -492,10 +492,12 @@ type Field = (Ident, Type)
 
 data Ident
   = LocalIdent Text
-  | PublicIdent Text
-  | PrivateIdent Text
+  | PublicIdent Text   -- ^ Public  (Uppercase)
+  | PrivateIdent Text  -- ^ private (lowercase)
   deriving (Show, Eq, Ord)
 
 
+-- | Something that _could_ have a package qualification.
+--
 data Qualified a = Qualified (Maybe Package) a
   deriving (Show, Eq, Ord, Functor)
