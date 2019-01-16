@@ -7,7 +7,8 @@ module Language.PureScript.CodeGen.Go.AST
   , Import(..)
   , Decl(..)
   , Expr(..)
-  , BooleanOp(..)
+  , BoolExpr
+  , BoolOp(..)
   , Block(..)
   , Literal(..)
   , Type(..)
@@ -199,7 +200,7 @@ getBlockType = \case
 -- i.e. something that evaluates to a value
 data Expr
   = LiteralExpr Literal
-  | BooleanOpExpr BooleanOp
+  | BoolOpExpr BoolOp
   | AbsExpr Field Type Block       -- ^ function abstraction: func(foo int) int { ... }
   | VarExpr Type (Qualified Ident) -- ^ foo
   | AppExpr Expr Expr              -- ^ function application: foo(bar)
@@ -215,35 +216,40 @@ data Expr
   deriving (Show, Eq)
 
 
-data BooleanOp
-  = AndOp   Expr Expr
+-- | Type synonym for clarity.
+--
+type BoolExpr = Expr
+
+
+data BoolOp
+  = AndOp   BoolExpr BoolExpr
   | EqOp    Expr Expr
   | NEqOp Expr Expr
   deriving (Show, Eq)
 
 
-true :: Expr
+true :: BoolExpr
 true = LiteralExpr (BoolLiteral True)
 
 
-false :: Expr
+false :: BoolExpr
 false = LiteralExpr (BoolLiteral False)
 
 
-ifElse :: Expr -> Block -> Block -> Block
+ifElse :: BoolExpr -> Block -> Block -> Block
 ifElse = IfElseStmnt
 
 
-and :: Expr -> Expr -> Expr
-and = (BooleanOpExpr .) . AndOp
+and :: BoolExpr -> BoolExpr -> BoolExpr
+and = (BoolOpExpr .) . AndOp
 
 
-eq :: Expr -> Expr -> Expr
-eq = (BooleanOpExpr .) . EqOp
+eq :: Expr -> Expr -> BoolExpr
+eq = (BoolOpExpr .) . EqOp
 
 
-notNil :: Expr -> Expr
-notNil expr = BooleanOpExpr (expr `NEqOp` NilExpr (getExprType expr))
+notNil :: Expr -> BoolExpr
+notNil expr = BoolOpExpr (expr `NEqOp` NilExpr (getExprType expr))
 
 
 data Literal
@@ -274,7 +280,7 @@ emptyStructType = StructType []
 getExprType :: Expr -> Type
 getExprType = \case
   LiteralExpr literal        -> getLiteralType literal
-  BooleanOpExpr _            -> BasicType BoolType
+  BoolOpExpr _               -> BasicType BoolType
   AbsExpr param result _     -> FuncType (snd param) result
   VarExpr varType _          -> varType
   BlockExpr block            -> getBlockType block
@@ -363,8 +369,8 @@ typeAssert want expr = case expr of
       _ ->
         undefined  -- shouldn't happen
 
-  BooleanOpExpr op ->
-    BooleanOpExpr $ case op of
+  BoolOpExpr op ->
+    BoolOpExpr $ case op of
       AndOp lhs rhs ->
         AndOp
           (typeAssert (BasicType BoolType) lhs)
@@ -445,8 +451,8 @@ substituteVar ident sub = go
     LiteralExpr literal ->
       LiteralExpr literal -- TODO
 
-    BooleanOpExpr op ->
-      BooleanOpExpr op -- TODO
+    BoolOpExpr op ->
+      BoolOpExpr op -- TODO
 
     AbsExpr field t block ->
       AbsExpr field t (mapBlock go block)

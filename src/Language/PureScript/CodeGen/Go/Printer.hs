@@ -94,8 +94,8 @@ printGoExpr = \case
   Go.LiteralExpr literal ->
     printGoLiteral literal
 
-  Go.BooleanOpExpr booleanOp ->
-    printGoBooleanOp booleanOp
+  Go.BoolOpExpr boolOp ->
+    printGoBoolOp boolOp
 
   Go.AbsExpr param result body ->
     printGoFunc Nothing param result body
@@ -216,8 +216,8 @@ printGoType = \case
     "interface{} /* " <> Text.pack what <> "*/"
 
 
-printGoBooleanOp :: Go.BooleanOp -> Text
-printGoBooleanOp = \case
+printGoBoolOp :: Go.BoolOp -> Text
+printGoBoolOp = \case
   Go.AndOp lhs rhs ->
     printGoExpr lhs <> " && " <> printGoExpr rhs
 

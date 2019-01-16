@@ -18,6 +18,7 @@ import qualified Language.PureScript.Types as Types
 import qualified Language.PureScript.AST.Literals as Literals
 import qualified Language.PureScript.Environment as Environment
 
+import Control.Applicative ((<|>))
 import Control.Monad (foldM, zipWithM)
 import Control.Monad.Reader (MonadReader)
 import System.FilePath.Posix ((</>))
@@ -122,6 +123,17 @@ isExported ident = do
   pure (ident `elem` exports)
 
 
+_isImported :: MonadReader Context m => Names.Qualified Names.Ident -> m Bool
+_isImported (Names.Qualified Nothing _) = pure False
+_isImported (Names.Qualified (Just moduleName) _) = do
+  currentModule <- Reader.asks (CoreFn.moduleName . ctxModule)
+  pure (moduleName /= currentModule)
+
+
+lookupType :: MonadReader Context m => Go.Qualified Go.Ident -> m (Maybe Go.Type)
+lookupType key = Map.lookup key <$> Reader.asks ctxTypes
+
+
 withType
   :: MonadReader Context m => Go.Qualified Go.Ident -> Go.Type -> m a -> m a
 withType ident t = Reader.local $
@@ -151,7 +163,7 @@ flattenBind = \case
 extractTypeDecls :: forall m. MonadReader Context m => [Bind] -> m [Go.Decl]
 extractTypeDecls binds = do
   let constructors = extractConstructors (bindExpr <$> binds)
-  traverse (uncurry constructorToTypeDecl) (Map.toList constructors)
+  traverse (uncurry constructorsToTypeDecl) (Map.toList constructors)
   where
   extractConstructors [] = Map.empty
   extractConstructors (expr : rest) =
@@ -164,35 +176,14 @@ extractTypeDecls binds = do
       _ ->
         extractConstructors rest
 
-  constructorToTypeDecl
+  constructorsToTypeDecl
     :: Names.ProperName 'Names.TypeName
     -> [(Names.ProperName 'Names.ConstructorName, [Names.Ident])]
     -> m Go.Decl
-  constructorToTypeDecl typeName ctors = do
+  constructorsToTypeDecl typeName ctors = do
     structName <- typeNameToGo typeName
     structFields <- traverse (uncurry constructorToField) ctors
     pure (Go.TypeDecl structName (Go.StructType structFields))
-
-
-constructorToField
-  :: forall m. MonadReader Context m
-  => Names.ProperName 'Names.ConstructorName
-  -> [Names.Ident]
-  -> m Go.Field
-constructorToField constructorName values =
-  (,) <$> fieldIdent <*> fieldType
-  where
-  fieldIdent :: m Go.Ident
-  fieldIdent = constructorNameToGo constructorName
-
-  fieldType :: m Go.Type
-  fieldType = do
-    -- If the constructor name is exported then it's
-    -- values must also be exported
-    exported <- isExported (Names.Ident $ unConstructorName constructorName)
-    let valueToIdent = bool privateIdent publicIdent exported
-    let valueToField v = (valueToIdent v, Go.EmptyInterfaceType)
-    pure $ Go.PointerType (Go.StructType (valueToField <$> values))
 
 
 absToGo
@@ -218,31 +209,31 @@ bindToGo bind = case bindExpr bind of
 
   -- Top level abstractions become func declarations
   CoreFn.Abs ann arg body ->
-     case annType ann of
+     case getAnnType ann of
        Just (FunctionApp argType returnType) -> do
          funcName <- identToGo (bindIdent bind)
          funcDecl <- absToGo (Go.FuncDecl funcName) arg argType returnType body
          pure [ funcDecl ]
 
        Just _  -> undefined
-       Nothing -> undefined
+       Nothing -> error ("missing type for " <> show (bindIdent bind))
 
   -- Nullary data constructors become var declarations
   -- (because we only need one instance of them)
-  CoreFn.Constructor _ann typeName' ctorName' [] -> do
-    ctorName <- constructorNameToGo ctorName'
-    typeName <- Go.Qualified Nothing <$> typeNameToGo typeName'
-    let literal = Go.NamedStructLiteral typeName [(ctorName, Go.emptyStructReference)]
-
-    pure [ Go.VarDecl ctorName (Go.NamedType typeName) (Go.LiteralExpr literal) ]
+  CoreFn.Constructor _ann typeName' constructorName' [] -> do
+    constructorName <- constructorNameToGo constructorName'
+    typeName <- unqualified <$> typeNameToGo typeName'
+    let literal = Go.NamedStructLiteral typeName [(constructorName, Go.emptyStructReference)]
+    let varDecl = Go.VarDecl constructorName (Go.NamedType typeName) (Go.LiteralExpr literal)
+    pure [ varDecl ]
 
   -- Non-nullary data constructors become func declarations
-  CoreFn.Constructor _ann typeName ctorName (value : values ) ->
-    singleton <$> constructorToGo typeName ctorName (value :| values)
+  CoreFn.Constructor _ann typeName constructorName (value : values ) ->
+    singleton <$> constructorToDecl typeName constructorName (value :| values)
 
   -- Anything else becomes a var declaration
-  expr -> do
-    case annType (CoreFn.extractAnn expr) of
+  expr ->
+    case getAnnType (CoreFn.extractAnn expr) of
       Nothing -> undefined
       Just varType' -> do
         varName <- identToGo (bindIdent bind)
@@ -258,7 +249,7 @@ exprToGo = \case
     Go.LiteralExpr <$> literalToGo ann literal
 
   CoreFn.Abs ann arg body ->
-    case annType ann of
+    case getAnnType ann of
       Just (FunctionApp argType returnType) ->
         absToGo Go.AbsExpr arg argType returnType body
 
@@ -268,22 +259,27 @@ exprToGo = \case
   CoreFn.App _ann lhs rhs ->
     Go.AppExpr <$> exprToGo lhs <*> exprToGo rhs
 
-  CoreFn.Var ann name -> do
-    let ident = undefined name
-    --mbType <- fmap asum . sequence $
-    --  [ pure (Map.lookup ident scope)
-    --  , withMaybeM (typeToGo ctx) (annType ann)
-    --  ]
-    mbType <- withMaybeM typeToGo (annType ann)
-    case mbType of
-      Just t ->
-        pure $ Go.VarExpr t ident
+  CoreFn.Var ann varName' -> do
+    varName <- qualifiedToGo varName'
+    ctxType <- lookupType varName
+    annType <- withMaybeM typeToGo (getAnnType ann)
 
-      _ ->
-        undefined
+    -- NOTE: prefer type information from scope because the
+    -- annotation type could be misleading for our purposes.
+    --
+    --     intId :: Int -> Int
+    --     intId = Prelude.identity
+    --
+    -- In the above case the annotation for Prelude.identity would say the
+    -- var had the type Int -> Int (rather than a -> a)
+    case ctxType <|> annType of
+      Nothing -> undefined
+      Just varType ->
+        pure (Go.VarExpr varType varName)
+
 
   CoreFn.Case ann exprs cases ->
-    caseToGo ann exprs cases
+    Go.BlockExpr <$> caseToGo ann exprs cases
 
   CoreFn.Let _ann binds expr ->
     letToGo binds expr
@@ -292,69 +288,59 @@ exprToGo = \case
   expr -> pure (Go.TodoExpr (show expr))
 
 
+-- | Convert a case expression to an if statement.
+--
 caseToGo
   :: forall m. MonadReader Context m
   => CoreFn.Ann
   -> [CoreFn.Expr CoreFn.Ann]
   -> [CoreFn.CaseAlternative CoreFn.Ann]
-  -> m Go.Expr
-caseToGo ann patterns' alternatives =
-  --     ^^^ NOTE: Annotation here gives us the result type
-  Go.BlockExpr <$> go patterns' alternatives
+  -> m Go.Block
+caseToGo ann _ [] = do
+  -- No more cases to match? Panic.
+  mbType <- withMaybeM typeToGo (getAnnType ann)
+  case mbType of
+    Nothing -> undefined
+    Just panicType -> pure (Go.panic panicType "Failed pattern match")
 
-  where
-  go :: [CoreFn.Expr CoreFn.Ann] -> [CoreFn.CaseAlternative CoreFn.Ann] -> m Go.Block
-  go _ [] = do
-    mbType <- withMaybeM typeToGo (annType ann)
-    case mbType of
-      Nothing -> undefined
-      Just panicType ->
-        pure (Go.panic panicType "Failed pattern match")
+caseToGo ann patterns (CoreFn.CaseAlternative caseBinders caseResult : rest) = do
+  (conditions, substitutions) <-
+    fold <$> zipWithM binderToGo (Right <$> patterns) caseBinders
 
-  go patterns (CoreFn.CaseAlternative caseBinders caseResult : rest) = do
-    (conditions, substitutions) <-
-      fold <$> zipWithM binderToGo (Right <$> patterns) caseBinders
+  let substitute :: Go.Expr -> Go.Expr
+      substitute expr = foldr ($) expr (uncurry Go.substituteVar <$> substitutions)
 
-    let substitute :: Go.Expr -> Go.Expr
-        substitute expr =
-          foldr ($) expr (uncurry Go.substituteVar <$> substitutions)
+  block <- caseToGo ann patterns rest
 
-    block <- go patterns rest
+  case caseResult of
+    Left guardedResults ->
+      foldM
+        (\accum (guard, result') -> do
+            result <- substitute <$> exprToGo result'
+            condition <- exprToGo guard
+            pure $ Go.ifElse
+              (foldConditions (substitute <$> snoc conditions condition))
+              (Go.return result)
+              accum
+        )
+        block
+        guardedResults
 
-    case caseResult of
-      Left guardedResults ->
-        foldM
-          (\accum (guard', result') -> do
-              expr <- substitute <$> exprToGo result'
-              guard <- exprToGo guard'
-              pure $ Go.ifElse
-                (foldConditions (substitute <$> snoc conditions guard))
-                (Go.return expr)
-                accum
-          )
-          block
-          guardedResults
-
-      Right result' -> do
-        result <- substitute <$> exprToGo result'
-        pure $ Go.ifElse
-          (foldConditions (substitute <$> conditions))
-          (Go.return result)
-          block
-
-  foldConditions :: [Go.Expr] -> Go.Expr
-  foldConditions [] = Go.true  -- NOTE: this should be optimized away
-  foldConditions [b] = b
-  foldConditions (b : bs) = b `Go.and` foldConditions bs
+    Right result' -> do
+      result <- substitute <$> exprToGo result'
+      pure $ Go.ifElse
+        (foldConditions (substitute <$> conditions))
+        (Go.return result)
+        block
 
 
--- | Returns conditions and var substitutions.
+-- | Convert a binder to conditions and var substitutions.
 --
 binderToGo
   :: MonadReader Context m
   => Either Go.Expr (CoreFn.Expr CoreFn.Ann)
   -> CoreFn.Binder CoreFn.Ann
-  -> m ([Go.Expr], [(Go.Qualified Go.Ident, Go.Expr)])
+  -> m ([Go.BoolExpr], [(Go.Qualified Go.Ident, Go.Expr)])
 binderToGo expr = \case
   CoreFn.NullBinder{} ->
     pure mempty
@@ -382,8 +368,6 @@ binderToGo expr = \case
                       publicIdent <$> idents'
                   | otherwise ->
                      privateIdent <$> idents'
-
-        -- foo <- constructorToField (Names.disqualify ctorName') idents'
 
         ctorName <- constructorNameToGo (Names.disqualify ctorName')
 
@@ -419,12 +403,12 @@ literalBinderToGo
   :: MonadReader Context m
   => Either Go.Expr (CoreFn.Expr CoreFn.Ann)
   -> Literals.Literal (CoreFn.Binder CoreFn.Ann)
-  -> m ([Go.Expr], [(Go.Qualified Go.Ident, Go.Expr)])
+  -> m ([Go.BoolExpr], [(Go.Qualified Go.Ident, Go.Expr)])
 literalBinderToGo expr = \case
   Literals.NumericLiteral (Left integer) -> do
     let want = Go.LiteralExpr (Go.IntLiteral integer)
     got <- either pure exprToGo expr
-    pure $ ([got `Go.eq` want], [])
+    pure ([got `Go.eq` want], [])
 
   _ ->
     undefined
@@ -452,13 +436,12 @@ literalToGo ann = \case
     pure (Go.BoolLiteral b)
 
   Literals.ArrayLiteral items ->
-    withMaybeM typeToGo (annType ann) >>= \case
+    withMaybeM typeToGo (getAnnType ann) >>= \case
       Just (Go.SliceType itemType) ->
         Go.SliceLiteral itemType <$> traverse exprToGo items
-      Just _ ->
-        undefined
-      Nothing ->
-        undefined
+
+      Just _  -> undefined
+      Nothing -> undefined
 
   Literals.ObjectLiteral keyValues ->
     Go.objectLiteral <$>
@@ -472,6 +455,8 @@ typeToGo t = do
   typeToGo' moduleName moduleExports t
 
 
+-- | Pure version of typeToGo
+--
 typeToGo'
   :: Monad m
   => Names.ModuleName
@@ -530,6 +515,7 @@ typeToGo' moduleName moduleExports = \case
     pure $ Go.NamedType
       (qualifiedToGo' moduleName moduleExports (Names.Ident . unTypeName <$> typeName))
 
+  -- NOTE: the implementation of unTypeApp makes head safe here
   (head . unTypeApp -> Types.TypeConstructor typeName) ->
     pure $ Go.NamedType
       (qualifiedToGo' moduleName moduleExports (Names.Ident . unTypeName <$> typeName))
@@ -537,6 +523,9 @@ typeToGo' moduleName moduleExports = \case
   unsupportedType -> undefined unsupportedType
 
 
+-- | Convert some let bindings to a go expression.
+--
+-- Note that the resulting expression should optimize to assignments.
 letToGo
   :: forall m. MonadReader Context m
   => [CoreFn.Bind CoreFn.Ann]
@@ -550,52 +539,79 @@ letToGo binds expr = go (flattenBinds binds)
     Go.letExpr (localIdent ident) <$> exprToGo value <*> go rest
 
 
-constructorToGo
+constructorToDecl
   :: forall m. MonadReader Context m
   => Names.ProperName 'Names.TypeName
   -> Names.ProperName 'Names.ConstructorName
   -> NonEmpty Names.Ident
   -> m Go.Decl
-constructorToGo typeName ctorName (value :| values) = do
-  moduleExports <- Reader.asks (CoreFn.moduleExports . ctxModule)
-  funcName <- identToGo (Names.Ident $ unConstructorName ctorName)
-  (returnType, body) <- go moduleExports values
+constructorToDecl typeName' constructorName' (valuesHead :| valuesTail) = do
+  funcName <- constructorNameToGo constructorName'
+  (returnType, funcBody) <- go valuesTail
   pure $ Go.FuncDecl funcName
-    (localIdent value, Go.EmptyInterfaceType)
+    (localIdent valuesHead, Go.EmptyInterfaceType)
     returnType
-    (Go.return body)
+    (Go.return funcBody)
   where
-  go :: [Names.Ident] -> [Names.Ident] -> m (Go.Type, Go.Expr)
-  go exports [] = pure
-    ( Go.NamedType (Go.Qualified Nothing $ undefined typeName)
-    , Go.LiteralExpr $ Go.NamedStructLiteral
-        (Go.Qualified Nothing $ undefined typeName)
-        [ ( undefined ctorName
-          , Go.ReferenceExpr . Go.LiteralExpr $
-              Go.StructLiteral
-                (fmap (\value' ->
-                   ( if Names.Ident (unConstructorName ctorName) `elem` exports
-                        then publicIdent value'
-                        else privateIdent value'
-                   , Go.EmptyInterfaceType
-                   ))
-                   (value : values))
-                (fmap (\value' ->
-                   ( if Names.Ident (unConstructorName ctorName) `elem` exports
-                        then publicIdent value'
-                        else privateIdent value'
-                   , Go.VarExpr Go.EmptyInterfaceType
-                       (localVar value')
-                   ))
-                   (value : values))
-          )
-        ]
-    )
-  go exports (ctor' : rest) =
-    go exports rest <&> \(gotype, expr) ->
-      ( Go.FuncType Go.EmptyInterfaceType gotype
-      , Go.AbsExpr (localIdent ctor', Go.EmptyInterfaceType) gotype (Go.return expr)
+  values :: [Names.Ident]
+  values = valuesHead : valuesTail
+
+  go :: [Names.Ident] -> m (Go.Type, Go.Expr)
+  go [] = do
+    typeName <- unqualified <$> typeNameToGo typeName'
+    constructorName <- constructorNameToGo constructorName'
+    exported <- isExported (Names.Ident $ unConstructorName constructorName')
+    let valueToIdent = bool privateIdent publicIdent exported
+    let valueToField v = (valueToIdent v, Go.EmptyInterfaceType)
+    let valueToKeyValue v = (valueToIdent v, Go.VarExpr Go.EmptyInterfaceType (localVar v))
+    pure
+      ( Go.NamedType typeName
+      -- PublicMaybe{ PublicJust: &struct{ value0 interface{} }{ value0: value0 }
+      , Go.LiteralExpr . Go.NamedStructLiteral typeName $
+          [ ( constructorName
+            , Go.ReferenceExpr . Go.LiteralExpr $
+                Go.StructLiteral (valueToField <$> values) (valueToKeyValue <$> values)
+            )
+          ]
       )
+
+  go (value : rest) =
+    go rest <&> \(returnType, body) ->
+      ( Go.FuncType Go.EmptyInterfaceType returnType
+      , Go.AbsExpr
+          (localIdent value, Go.EmptyInterfaceType)
+          returnType
+          (Go.return body)
+      )
+
+
+constructorToField
+  :: forall m. MonadReader Context m
+  => Names.ProperName 'Names.ConstructorName
+  -> [Names.Ident]
+  -> m Go.Field
+constructorToField constructorName values =
+  (,) <$> fieldIdent <*> fieldType
+  where
+  fieldIdent :: m Go.Ident
+  fieldIdent = constructorNameToGo constructorName
+
+  fieldType :: m Go.Type
+  fieldType = do
+    -- If the constructor name is exported then it's
+    -- values must also be exported
+    exported <- isExported (Names.Ident $ unConstructorName constructorName)
+    let valueToIdent = bool privateIdent publicIdent exported
+    let valueToField v = (valueToIdent v, Go.EmptyInterfaceType)
+    pure $ Go.PointerType (Go.StructType (valueToField <$> values))
+
+
+-- | && together a bunch of boolean expressions.
+--
+foldConditions :: [Go.BoolExpr] -> Go.BoolExpr
+foldConditions [] = Go.true  -- NOTE: this should be optimized away
+foldConditions [b] = b
+foldConditions (b : bs) = b `Go.and` foldConditions bs
 
 
 -- IDENTIFIERS
@@ -613,11 +629,11 @@ identToGo' moduleExports ident
   | otherwise = privateIdent ident
 
 
-_qualifiedToGo
+qualifiedToGo
   :: MonadReader Context m
   => Names.Qualified Names.Ident
   -> m (Go.Qualified Go.Ident)
-_qualifiedToGo qualifiedIdent = do
+qualifiedToGo qualifiedIdent = do
   currentModule <- Reader.asks (CoreFn.moduleName . ctxModule)
   moduleExports <- Reader.asks (CoreFn.moduleExports . ctxModule)
   pure (qualifiedToGo' currentModule moduleExports qualifiedIdent)
@@ -703,8 +719,8 @@ unConstructorName = Names.runProperName
 -- UTIL
 
 
-annType :: CoreFn.Ann -> Maybe Types.Type
-annType (_, _, mbType, _) = mbType
+getAnnType :: CoreFn.Ann -> Maybe Types.Type
+getAnnType (_, _, mbType, _) = mbType
 
 
 unTypeApp :: Types.Type -> [Types.Type]
@@ -721,7 +737,7 @@ singleton = (:[])
 
 
 snoc :: [a] -> a -> [a]
-snoc as a = as <> [a]
+snoc as a = foldr (:) [a] as
 
 
 withMaybeM :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
