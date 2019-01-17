@@ -213,6 +213,7 @@ data Expr
   | ReferenceExpr Expr             -- ^ &foo
   | DereferenceExpr Expr           -- ^ *foo
   | StructAccessorExpr Expr Ident  -- ^ foo.bar
+  | SliceIndexerExpr Expr Integer  -- ^ foo[0]
   | NilExpr Type                   -- ^ nil
 
   -- XXX
@@ -226,9 +227,9 @@ type BoolExpr = Expr
 
 
 data BoolOp
-  = AndOp   BoolExpr BoolExpr
-  | EqOp    Expr Expr
-  | NEqOp Expr Expr
+  = AndOp  BoolExpr BoolExpr
+  | EqOp   Expr     Expr
+  | NEqOp  Expr     Expr
   deriving (Show, Eq)
 
 
@@ -304,6 +305,7 @@ getExprType = \case
   TypeAssertExpr assertion _ -> assertion
   ReferenceExpr expr         -> PointerType (getExprType expr)
   DereferenceExpr expr       -> getExprType expr
+  SliceIndexerExpr expr _    -> getExprType expr
   NilExpr t                  -> NilType t
 
   AppExpr lhs _ ->
@@ -341,6 +343,7 @@ typeAssert want expr = case expr of
   TypeAssertExpr{}          -> expr
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
+  SliceIndexerExpr{}        -> expr -- ???
   NilExpr{}                 -> expr
 
   VarExpr varType _ ->
@@ -491,6 +494,9 @@ substituteVar ident sub = go
 
     StructAccessorExpr expr' ident' ->
       StructAccessorExpr (go expr') ident'
+
+    SliceIndexerExpr expr' i ->
+      SliceIndexerExpr (go expr') i
 
     NilExpr t ->
       NilExpr t

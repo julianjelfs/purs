@@ -125,6 +125,9 @@ printGoExpr = \case
   Go.StructAccessorExpr expr ident ->
     printGoExpr expr <> "." <> printGoIdent ident
 
+  Go.SliceIndexerExpr expr i ->
+    printGoExpr expr <> "[" <> showT i <> "]"
+
   Go.NilExpr _ ->
     "nil"
 

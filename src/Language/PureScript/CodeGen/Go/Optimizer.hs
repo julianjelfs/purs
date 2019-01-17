@@ -111,6 +111,9 @@ optimizeExpr = \case
   Go.StructAccessorExpr expr ident ->
     Go.StructAccessorExpr (optimizeExpr expr) ident
 
+  Go.SliceIndexerExpr expr i ->
+    Go.SliceIndexerExpr (optimizeExpr expr) i
+
   Go.NilExpr t ->
     Go.NilExpr t
 
@@ -135,9 +138,14 @@ canConst = \case
 --
 isTrue :: Go.Expr -> Bool
 isTrue = \case
-  Go.LiteralExpr (Go.BoolLiteral True) -> True
-  Go.BoolOpExpr (Go.AndOp lhs rhs)  -> isTrue lhs && isTrue rhs
-  _expr -> False
+  Go.LiteralExpr (Go.BoolLiteral True) ->
+    True
+
+  Go.BoolOpExpr (Go.AndOp lhs rhs) ->
+    isTrue lhs && isTrue rhs
+
+  _expr ->
+    False
 
 
 pattern GoTrue :: Go.Expr

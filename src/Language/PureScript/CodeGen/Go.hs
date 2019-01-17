@@ -378,9 +378,7 @@ binderToGo expr = \case
 
         mappend ([Go.notNil construct], []) . fold <$>
           zipWithM
-            (\ident binder ->
-                binderToGo (Left $ Go.StructAccessorExpr construct ident) binder
-            )
+            (\ident binder -> binderToGo (Left $ Go.StructAccessorExpr construct ident) binder)
             idents binders
 
       _ ->
@@ -421,8 +419,10 @@ literalBinderToGo expr = \case
     case Go.getExprType slice of
       Go.SliceType itemType -> do
         let lenCheck = Go.len itemType slice `Go.eq` Go.int (length items)
-        -- TODO: traverse items where expr is a slice index
-        pure ([lenCheck], [])
+        mappend ([lenCheck], []) . fold <$>
+          zipWithM
+            (\i binder -> binderToGo (Left $ Go.SliceIndexerExpr slice i) binder)
+            [0..] items
 
       _ -> undefined
   _ ->
