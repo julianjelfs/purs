@@ -288,6 +288,8 @@ printGoIdent = sanitise . \case
   Go.LocalIdent ident ->
     fixKeywords ident
 
+  Go.BuiltinIdent ident ->
+    ident
   where
   mkPublic :: Text -> Text
   mkPublic = ("Public_" <>)

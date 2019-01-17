@@ -352,14 +352,22 @@ binderToGo expr = \case
   CoreFn.LiteralBinder _ann literal ->
     literalBinderToGo expr literal
 
-  CoreFn.ConstructorBinder ann _typeName ctorName' binders ->
+  CoreFn.ConstructorBinder ann _typeName constructorName' binders ->
     case ann of
       (_, _, _, Just (CoreFn.IsConstructor _ idents')) -> do
-        ctorName <- constructorNameToGo (Names.disqualify ctorName')
+        ctorName <-
+          case unConstructorName <$> constructorName' of
+            Names.Qualified Nothing ident ->
+              pure (localIdent ident) -- ???
+            Names.Qualified (Just mn) ident ->
+              Go.disqualify <$> qualifiedToGo mn ident
+
         let idents = idents' <&> bool privateIdent publicIdent (Go.isPublic ctorName)
-        -- Bit of a wierd hack this...
+
         let ctorType = Go.StructType . singleton $
-              (ctorName, Go.StructType ((,Go.EmptyInterfaceType) <$> idents))
+              ( ctorName
+              , Go.StructType ((,Go.EmptyInterfaceType) <$> idents)
+              )
 
         construct <-
           either pure exprToGo expr <&> \case
@@ -388,11 +396,35 @@ literalBinderToGo
   -> Literals.Literal (CoreFn.Binder CoreFn.Ann)
   -> m ([Go.BoolExpr], [(Go.Qualified Go.Ident, Go.Expr)])
 literalBinderToGo expr = \case
-  Literals.NumericLiteral (Left integer) -> do
-    let want = Go.LiteralExpr (Go.IntLiteral integer)
+  Literals.NumericLiteral num -> do
+    let want = Go.LiteralExpr (either Go.IntLiteral Go.FloatLiteral num)
     got <- either pure exprToGo expr
     pure ([got `Go.eq` want], [])
 
+  Literals.StringLiteral psString -> do
+    let want = Go.LiteralExpr (Go.StringLiteral (showT psString))
+    got <- either pure exprToGo expr
+    pure ([got `Go.eq` want], [])
+
+  Literals.CharLiteral char -> do
+    let want = Go.LiteralExpr (Go.CharLiteral char)
+    got <- either pure exprToGo expr
+    pure ([got `Go.eq` want], [])
+
+  Literals.BooleanLiteral b -> do
+    let want = Go.LiteralExpr (Go.BoolLiteral b)
+    got <- either pure exprToGo expr
+    pure ([got `Go.eq` want], [])
+
+  Literals.ArrayLiteral items -> do
+    slice <- either pure exprToGo expr
+    case Go.getExprType slice of
+      Go.SliceType itemType -> do
+        let lenCheck = Go.len itemType slice `Go.eq` Go.int (length items)
+        -- TODO: traverse items where expr is a slice index
+        pure ([lenCheck], [])
+
+      _ -> undefined
   _ ->
     undefined
 

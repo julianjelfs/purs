@@ -35,9 +35,12 @@ module Language.PureScript.CodeGen.Go.AST
   , and
   , eq
   , notNil
+  , len
+  , int
   , letExpr
   , substituteVar
   , isPublic
+  , disqualify
   ) where
 
 import Prelude.Compat hiding (return, and)
@@ -251,6 +254,19 @@ eq = (BoolOpExpr .) . EqOp
 
 notNil :: Expr -> BoolExpr
 notNil expr = BoolOpExpr (expr `NEqOp` NilExpr (getExprType expr))
+
+
+len :: Type -> Expr -> Expr
+len itemType =
+  AppExpr
+    (VarExpr
+       (FuncType (SliceType itemType) (BasicType IntType))
+       (Qualified Nothing (BuiltinIdent "len"))
+    )
+
+
+int :: Integral a => a -> Expr
+int = LiteralExpr . IntLiteral . toInteger
 
 
 data Literal
@@ -499,6 +515,7 @@ type Field = (Ident, Type)
 
 data Ident
   = LocalIdent Text
+  | BuiltinIdent Text
   | PublicIdent Text   -- ^ Public  (Uppercase)
   | PrivateIdent Text  -- ^ private (lowercase)
   deriving (Show, Eq, Ord)
@@ -513,3 +530,7 @@ isPublic _ = False
 --
 data Qualified a = Qualified (Maybe Package) a
   deriving (Show, Eq, Ord, Functor)
+
+
+disqualify :: Qualified a -> a
+disqualify (Qualified _ a) = a
