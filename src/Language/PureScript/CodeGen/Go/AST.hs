@@ -37,6 +37,7 @@ module Language.PureScript.CodeGen.Go.AST
   , notNil
   , letExpr
   , substituteVar
+  , isPublic
   ) where
 
 import Prelude.Compat hiding (return, and)
@@ -501,6 +502,11 @@ data Ident
   | PublicIdent Text   -- ^ Public  (Uppercase)
   | PrivateIdent Text  -- ^ private (lowercase)
   deriving (Show, Eq, Ord)
+
+
+isPublic :: Ident -> Bool
+isPublic (PublicIdent _) = True
+isPublic _ = False
 
 
 -- | Something that _could_ have a package qualification.

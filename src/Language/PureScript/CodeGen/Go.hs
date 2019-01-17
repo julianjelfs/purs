@@ -26,7 +26,7 @@ import Data.List.NonEmpty (NonEmpty(..))
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Functor ((<&>))
-import Data.Foldable (fold)
+import Data.Foldable (fold, foldl')
 import Data.Bool (bool)
 import Data.Bifunctor (bimap)
 import Language.PureScript.CodeGen.Go.Plumbing as Plumbing
@@ -51,8 +51,7 @@ moduleToGo env core@CoreFn.Module{..} importPrefix =
 
   fileDecls :: m [Go.Decl]
   fileDecls = do
-    context <- newContext env core
-    flip Reader.runReaderT context $ do
+    flip Reader.runReaderT (newContext env core) $ do
       let binds = flattenBinds (CoreFn.moduleDecls core)
       typeDecls <- extractTypeDecls binds
       valueDecls <- traverse bindToGo binds
@@ -86,48 +85,43 @@ data Context = Context
   }
 
 
-newContext
-  :: forall m. Monad m
-  => Environment.Environment
-  -> CoreFn.Module CoreFn.Ann
-  -> m Context
+newContext :: Environment.Environment -> CoreFn.Module CoreFn.Ann -> Context
 newContext env core@CoreFn.Module{..} =
-  Context core { CoreFn.moduleExports = moduleExports' } <$> initialTypes
+  Context core { CoreFn.moduleExports = allModuleExports } initialTypes
   where
-  moduleExports' :: [Names.Ident]
-  moduleExports' = moduleExports <> exportedTypeNames
+  allModuleExports :: [Names.Ident]
+  allModuleExports = moduleExports <> exportedTypeNames
 
   exportedTypeNames :: [Names.Ident]
   exportedTypeNames =
-    List.nub . fmap (Names.Ident . unTypeName) . mapMaybe getExportedTypeName $
+    List.nub . fmap unTypeName . mapMaybe getExportedTypeName $
       flattenBinds moduleDecls
     where
     getExportedTypeName :: Bind -> Maybe (Names.ProperName 'Names.TypeName)
-    getExportedTypeName (Bind _ ident expr) = case expr of
-      CoreFn.Constructor _ typeName _ _
-        | ident `elem` moduleExports -> Just typeName
-      _ -> Nothing
+    getExportedTypeName bind =
+      case bindExpr bind of
+        CoreFn.Constructor _ typeName _ _
+          | bindIdent bind `elem` moduleExports -> Just typeName
 
-  initialTypes :: m (Map.Map (Go.Qualified Go.Ident) Go.Type)
-  initialTypes = foldM go Map.empty (Map.toList $ Environment.names env)
+        _ -> Nothing
+
+  initialTypes :: Map.Map (Go.Qualified Go.Ident) Go.Type
+  initialTypes = foldl' folder Map.empty $ Map.toList (Environment.names env)
     where
-    go accum (ident', (t', _, _)) = do
-      let ident = qualifiedToGo' moduleName moduleExports ident'
-      t <- typeToGo' moduleName moduleExports t'
-      pure (Map.insert ident t accum)
+    folder accum (Names.Qualified Nothing ident, (value', _, _)) =
+      let key   = unqualified (identToGo' moduleExports ident)
+          value = typeToGo' moduleName allModuleExports value'
+      in  Map.insert key value accum
+    folder accum (Names.Qualified (Just mn) ident, (value', _, _)) =
+      let key   = qualifiedToGo' moduleName moduleExports mn ident
+          value = typeToGo' moduleName allModuleExports value'
+      in  Map.insert key value accum
 
 
 isExported :: MonadReader Context m => Names.Ident -> m Bool
 isExported ident = do
   exports <- Reader.asks (CoreFn.moduleExports . ctxModule)
   pure (ident `elem` exports)
-
-
-_isImported :: MonadReader Context m => Names.Qualified Names.Ident -> m Bool
-_isImported (Names.Qualified Nothing _) = pure False
-_isImported (Names.Qualified (Just moduleName) _) = do
-  currentModule <- Reader.asks (CoreFn.moduleName . ctxModule)
-  pure (moduleName /= currentModule)
 
 
 lookupType :: MonadReader Context m => Go.Qualified Go.Ident -> m (Maybe Go.Type)
@@ -260,7 +254,10 @@ exprToGo = \case
     Go.AppExpr <$> exprToGo lhs <*> exprToGo rhs
 
   CoreFn.Var ann varName' -> do
-    varName <- qualifiedToGo varName'
+    varName <- case varName' of
+      Names.Qualified Nothing ident -> pure (localVar ident)
+      Names.Qualified (Just mn) ident -> qualifiedToGo mn ident
+
     ctxType <- lookupType varName
     annType <- withMaybeM typeToGo (getAnnType ann)
 
@@ -272,8 +269,11 @@ exprToGo = \case
     --
     -- In the above case the annotation for Prelude.identity would say the
     -- var had the type Int -> Int (rather than a -> a)
+    fixme <- Reader.asks ctxTypes
     case ctxType <|> annType of
-      Nothing -> undefined
+      Nothing ->
+        error ("no type information found for " <> show varName <> "\n\n" <> show fixme)
+
       Just varType ->
         pure (Go.VarExpr varType varName)
 
@@ -355,40 +355,23 @@ binderToGo expr = \case
   CoreFn.ConstructorBinder ann _typeName ctorName' binders ->
     case ann of
       (_, _, _, Just (CoreFn.IsConstructor _ idents')) -> do
-        currentModule <- Reader.asks (CoreFn.moduleName . ctxModule)
-        moduleExports <- Reader.asks (CoreFn.moduleExports . ctxModule)
-
-        let idents :: [Go.Ident]
-            idents =
-              case ctorName' of
-                Names.Qualified qual name
-                  | maybe False (/= currentModule) qual ->
-                      publicIdent <$> idents'
-                  | Names.Ident (unConstructorName name) `elem` moduleExports ->
-                      publicIdent <$> idents'
-                  | otherwise ->
-                     privateIdent <$> idents'
-
         ctorName <- constructorNameToGo (Names.disqualify ctorName')
-
-        let constructType :: Go.Type
-            constructType =
-              -- Bit of a wierd hack this...
-              Go.StructType . singleton $
-                ( ctorName, Go.StructType (fmap (,Go.EmptyInterfaceType) idents))
+        let idents = idents' <&> bool privateIdent publicIdent (Go.isPublic ctorName)
+        -- Bit of a wierd hack this...
+        let ctorType = Go.StructType . singleton $
+              (ctorName, Go.StructType ((,Go.EmptyInterfaceType) <$> idents))
 
         construct <-
           either pure exprToGo expr <&> \case
             Go.VarExpr _ ident ->
-              Go.StructAccessorExpr (Go.VarExpr constructType ident) ctorName
+              Go.StructAccessorExpr (Go.VarExpr ctorType ident) ctorName
             other ->
               Go.StructAccessorExpr other ctorName
 
         mappend ([Go.notNil construct], []) . fold <$>
           zipWithM
             (\ident binder ->
-                binderToGo
-                  (Left $ Go.StructAccessorExpr construct ident) binder
+                binderToGo (Left $ Go.StructAccessorExpr construct ident) binder
             )
             idents binders
 
@@ -452,22 +435,21 @@ typeToGo :: MonadReader Context m => Types.Type -> m Go.Type
 typeToGo t = do
   moduleName <- Reader.asks (CoreFn.moduleName . ctxModule)
   moduleExports <- Reader.asks (CoreFn.moduleExports . ctxModule)
-  typeToGo' moduleName moduleExports t
+  pure (typeToGo' moduleName moduleExports t)
 
 
 -- | Pure version of typeToGo
 --
 typeToGo'
-  :: Monad m
-  => Names.ModuleName
+  :: Names.ModuleName
   -> [Names.Ident]
   -> Types.Type
-  -> m Go.Type
+  -> Go.Type
 typeToGo' moduleName moduleExports = \case
   FunctionApp l r ->
     Go.FuncType
-      <$> typeToGo' moduleName moduleExports l
-      <*> typeToGo' moduleName moduleExports r
+      (typeToGo' moduleName moduleExports l)
+      (typeToGo' moduleName moduleExports r)
 
   Types.ForAll _ t _ ->
     typeToGo' moduleName moduleExports t
@@ -479,48 +461,57 @@ typeToGo' moduleName moduleExports = \case
     typeToGo' moduleName moduleExports t
 
   Prim "Boolean" ->
-    pure (Go.BasicType Go.BoolType)
+    Go.BasicType Go.BoolType
 
   Prim "Int" ->
-    pure (Go.BasicType Go.IntType)
+    Go.BasicType Go.IntType
 
   Prim "Number" ->
-    pure (Go.BasicType Go.Float64Type)
+    Go.BasicType Go.Float64Type
 
   Prim "String" ->
-    pure (Go.BasicType Go.StringType)
+    Go.BasicType Go.StringType
 
   Prim "Char" ->
-    pure (Go.BasicType Go.RuneType) -- ???
+    Go.BasicType Go.RuneType -- ???
 
   Types.TypeVar{} ->
-    pure Go.EmptyInterfaceType
+    Go.EmptyInterfaceType
 
   Types.Skolem{} ->
-    pure Go.EmptyInterfaceType
+    Go.EmptyInterfaceType
 
   Types.TypeApp (Prim "Array") itemType ->
-    Go.SliceType <$> typeToGo' moduleName moduleExports itemType
+    Go.SliceType (typeToGo' moduleName moduleExports itemType)
 
   Types.TypeApp (Prim "Record") _ ->
-    pure Go.objectType
+    Go.objectType
 
   Types.RCons{} ->
-    pure Go.objectType
+    Go.objectType
 
   Types.REmpty{} ->
-    pure Go.objectType
+    Go.objectType
 
-  Types.TypeConstructor typeName ->
-    pure $ Go.NamedType
-      (qualifiedToGo' moduleName moduleExports (Names.Ident . unTypeName <$> typeName))
+  Types.TypeConstructor typeConstructor ->
+    typeConstructorType typeConstructor
 
-  -- NOTE: the implementation of unTypeApp makes head safe here
-  (head . unTypeApp -> Types.TypeConstructor typeName) ->
-    pure $ Go.NamedType
-      (qualifiedToGo' moduleName moduleExports (Names.Ident . unTypeName <$> typeName))
+  (head . unTypeApp -> Types.TypeConstructor typeConstructor) ->
+  -- ^ NOTE: the implementation of unTypeApp makes head safe here
+    typeConstructorType typeConstructor
 
   unsupportedType -> undefined unsupportedType
+
+  where
+  typeConstructorType
+    :: Names.Qualified (Names.ProperName 'Names.TypeName) -> Go.Type
+  typeConstructorType = \case
+    Names.Qualified Nothing typeName' ->
+      let typeName = unqualified (identToGo' moduleExports $ unTypeName typeName')
+      in (Go.NamedType typeName)
+    Names.Qualified (Just mn) typeName' ->
+      let typeName = qualifiedToGo' moduleName moduleExports mn (unTypeName typeName')
+      in (Go.NamedType typeName)
 
 
 -- | Convert some let bindings to a go expression.
@@ -560,7 +551,7 @@ constructorToDecl typeName' constructorName' (valuesHead :| valuesTail) = do
   go [] = do
     typeName <- unqualified <$> typeNameToGo typeName'
     constructorName <- constructorNameToGo constructorName'
-    exported <- isExported (Names.Ident $ unConstructorName constructorName')
+    exported <- isExported (unConstructorName constructorName')
     let valueToIdent = bool privateIdent publicIdent exported
     let valueToField v = (valueToIdent v, Go.EmptyInterfaceType)
     let valueToKeyValue v = (valueToIdent v, Go.VarExpr Go.EmptyInterfaceType (localVar v))
@@ -600,7 +591,7 @@ constructorToField constructorName values =
   fieldType = do
     -- If the constructor name is exported then it's
     -- values must also be exported
-    exported <- isExported (Names.Ident $ unConstructorName constructorName)
+    exported <- isExported (unConstructorName constructorName)
     let valueToIdent = bool privateIdent publicIdent exported
     let valueToField v = (valueToIdent v, Go.EmptyInterfaceType)
     pure $ Go.PointerType (Go.StructType (valueToField <$> values))
@@ -631,29 +622,26 @@ identToGo' moduleExports ident
 
 qualifiedToGo
   :: MonadReader Context m
-  => Names.Qualified Names.Ident
+  => Names.ModuleName
+  -> Names.Ident
   -> m (Go.Qualified Go.Ident)
-qualifiedToGo qualifiedIdent = do
+qualifiedToGo moduleName ident = do
   currentModule <- Reader.asks (CoreFn.moduleName . ctxModule)
   moduleExports <- Reader.asks (CoreFn.moduleExports . ctxModule)
-  pure (qualifiedToGo' currentModule moduleExports qualifiedIdent)
+  pure (qualifiedToGo' currentModule moduleExports moduleName ident)
 
 
 qualifiedToGo'
   :: Names.ModuleName
   -> [Names.Ident]
-  -> Names.Qualified Names.Ident
+  -> Names.ModuleName
+  -> Names.Ident
   -> Go.Qualified Go.Ident
-qualifiedToGo' currentModule moduleExports = \case
-  Names.Qualified Nothing ident ->
-    Go.Qualified Nothing (identToGo' moduleExports ident)
-  Names.Qualified (Just moduleName) ident
-    | moduleName == currentModule ->
-        Go.Qualified Nothing (identToGo' moduleExports ident)
-    | otherwise ->
-        Go.Qualified
-          (Just (Go.packageFromModuleName moduleName))
-          (publicIdent ident)
+qualifiedToGo' currentModule moduleExports moduleName ident
+  | moduleName == currentModule =
+      unqualified (identToGo' moduleExports ident)
+  | otherwise =
+      qualified moduleName (publicIdent ident)
 
 
 typeNameToGo :: MonadReader Context m => Names.ProperName 'Names.TypeName -> m Go.Ident
@@ -663,8 +651,7 @@ typeNameToGo typeName = do
 
 
 typeNameToGo' :: [Names.Ident] -> Names.ProperName 'Names.TypeName -> Go.Ident
-typeNameToGo' moduleExports =
-  identToGo' moduleExports . Names.Ident . unTypeName
+typeNameToGo' moduleExports = identToGo' moduleExports . unTypeName
 
 
 constructorNameToGo :: MonadReader Context m => Names.ProperName 'Names.ConstructorName -> m Go.Ident
@@ -674,8 +661,7 @@ constructorNameToGo ctorName = do
 
 
 constructorNameToGo' :: [Names.Ident] -> Names.ProperName 'Names.ConstructorName -> Go.Ident
-constructorNameToGo' moduleExports =
-  identToGo' moduleExports . Names.Ident . unConstructorName
+constructorNameToGo' moduleExports = identToGo' moduleExports . unConstructorName
 
 
 localIdent :: Names.Ident -> Go.Ident
@@ -688,6 +674,10 @@ localVar = unqualified . localIdent
 
 unqualified :: a -> Go.Qualified a
 unqualified = Go.Qualified Nothing
+
+
+qualified :: Names.ModuleName -> a -> Go.Qualified a
+qualified mn = Go.Qualified (Just $ Go.packageFromModuleName mn)
 
 
 publicIdent :: Names.Ident -> Go.Ident
@@ -705,15 +695,15 @@ unIdent (Names.GenIdent (Just name) n) = "__" <> name <> Text.pack (show n)
 unIdent Names.UnusedIdent              = "__unused"
 
 
-unTypeName :: Names.ProperName 'Names.TypeName -> Text
-unTypeName (Names.ProperName typeName) = typeName <> "Type"
---                                                    ^^^^
+unTypeName :: Names.ProperName 'Names.TypeName -> Names.Ident
+unTypeName (Names.ProperName typeName) = Names.Ident (typeName <> "Type")
+--                                                                 ^^^^
 --                               Need to add a suffix because types and
 --                               values share the same namespace
 
 
-unConstructorName :: Names.ProperName 'Names.ConstructorName -> Text
-unConstructorName = Names.runProperName
+unConstructorName :: Names.ProperName 'Names.ConstructorName -> Names.Ident
+unConstructorName = Names.Ident . Names.runProperName
 
 
 -- UTIL
