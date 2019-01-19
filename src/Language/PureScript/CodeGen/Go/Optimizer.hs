@@ -111,6 +111,9 @@ optimizeExpr = \case
   Go.StructAccessorExpr expr ident ->
     Go.StructAccessorExpr (optimizeExpr expr) ident
 
+  Go.MapAccessorExpr expr key ->
+    Go.MapAccessorExpr (optimizeExpr expr) (optimizeExpr key)
+
   Go.SliceIndexerExpr expr i ->
     Go.SliceIndexerExpr (optimizeExpr expr) i
 

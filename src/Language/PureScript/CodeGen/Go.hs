@@ -27,9 +27,11 @@ import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Functor ((<&>))
 import Data.Foldable (fold, foldl')
+import Data.Traversable (for)
 import Data.Bool (bool)
 import Data.Bifunctor (bimap)
 import Language.PureScript.CodeGen.Go.Plumbing as Plumbing
+import Language.PureScript.PSString (PSString)
 
 
 moduleToGo
@@ -400,7 +402,7 @@ literalBinderToGo expr = \case
     pure ([got `Go.eq` want], [])
 
   Literals.StringLiteral psString -> do
-    let want = Go.LiteralExpr (Go.StringLiteral (showT psString))
+    let want = Go.LiteralExpr (psStringToGo psString)
     got <- either pure exprToGo expr
     pure ([got `Go.eq` want], [])
 
@@ -425,8 +427,14 @@ literalBinderToGo expr = \case
             [0..] items
 
       _ -> undefined
-  _ ->
-    undefined
+
+  Literals.ObjectLiteral keyValues -> do
+    fold <$> for keyValues
+      (\(psString, binder) -> do
+         let key = Go.LiteralExpr (psStringToGo psString)
+         value <- flip Go.MapAccessorExpr key <$> either pure exprToGo expr
+         mappend ([Go.notNil value], []) <$> binderToGo (Left value) binder
+      )
 
 
 literalToGo
@@ -442,7 +450,7 @@ literalToGo ann = \case
     pure (Go.FloatLiteral double)
 
   Literals.StringLiteral psString ->
-    pure (Go.StringLiteral (showT psString))
+    pure (psStringToGo psString)
 
   Literals.CharLiteral char ->
     pure (Go.CharLiteral char)
@@ -627,6 +635,10 @@ constructorToField constructorName values =
     let valueToIdent = bool privateIdent publicIdent exported
     let valueToField v = (valueToIdent v, Go.EmptyInterfaceType)
     pure $ Go.PointerType (Go.StructType (valueToField <$> values))
+
+
+psStringToGo :: PSString -> Go.Literal
+psStringToGo = Go.StringLiteral . showT
 
 
 -- | && together a bunch of boolean expressions.

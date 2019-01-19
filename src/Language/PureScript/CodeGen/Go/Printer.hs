@@ -125,6 +125,9 @@ printGoExpr = \case
   Go.StructAccessorExpr expr ident ->
     printGoExpr expr <> "." <> printGoIdent ident
 
+  Go.MapAccessorExpr expr key ->
+    printGoExpr expr <> "[" <> printGoExpr key <> "]"
+
   Go.SliceIndexerExpr expr i ->
     printGoExpr expr <> "[" <> showT i <> "]"
 
@@ -209,9 +212,6 @@ printGoType = \case
     "*" <> printGoType gotype
 
   Go.PanicType gotype ->
-    printGoType gotype
-
-  Go.NilType gotype ->
     printGoType gotype
 
   -- XXX

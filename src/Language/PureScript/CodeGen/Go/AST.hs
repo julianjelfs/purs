@@ -103,7 +103,6 @@ data Type
   | NamedType (Qualified Ident)
   | PointerType Type
   | PanicType Type
-  | NilType Type
 
   -- XXX
   | UnknownType String
@@ -122,7 +121,6 @@ instance Eq Type where
   EmptyInterfaceType == EmptyInterfaceType = True
   NamedType a        == NamedType b        = a == b
   PointerType a      == PointerType b      = a == b
-  NilType a          == NilType b          = a == b
   _                  == _                  = False
 
 
@@ -213,6 +211,7 @@ data Expr
   | ReferenceExpr Expr             -- ^ &foo
   | DereferenceExpr Expr           -- ^ *foo
   | StructAccessorExpr Expr Ident  -- ^ foo.bar
+  | MapAccessorExpr Expr Expr      -- ^ foo[bar]
   | SliceIndexerExpr Expr Integer  -- ^ foo[0]
   | NilExpr Type                   -- ^ nil
 
@@ -305,8 +304,7 @@ getExprType = \case
   TypeAssertExpr assertion _ -> assertion
   ReferenceExpr expr         -> PointerType (getExprType expr)
   DereferenceExpr expr       -> getExprType expr
-  SliceIndexerExpr expr _    -> getExprType expr
-  NilExpr t                  -> NilType t
+  NilExpr t                  -> t
 
   AppExpr lhs _ ->
     case getExprType lhs of
@@ -317,6 +315,16 @@ getExprType = \case
     case getExprType expr of
       StructType fields -> maybe (error $ show ident <> show fields) id (lookup ident fields)
       other -> error ("bad struct type: " <> show other)
+
+  MapAccessorExpr expr _ ->
+    case getExprType expr of
+      MapType _ valueType -> valueType
+      other -> error ("bad map type: " <> show other)
+
+  SliceIndexerExpr expr _ ->
+    case getExprType expr of
+      SliceType itemType -> itemType
+      other -> error ("bad slice type: " <> show other)
 
   -- XXX
   TodoExpr _ -> EmptyInterfaceType
@@ -343,7 +351,6 @@ typeAssert want expr = case expr of
   TypeAssertExpr{}          -> expr
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
-  SliceIndexerExpr{}        -> expr -- ???
   NilExpr{}                 -> expr
 
   VarExpr varType _ ->
@@ -360,6 +367,20 @@ typeAssert want expr = case expr of
   StructAccessorExpr{} ->
     case getExprType expr of
       EmptyInterfaceType ->
+        TypeAssertExpr want expr
+      _ ->
+        expr
+
+  MapAccessorExpr{} ->
+    case getExprType expr of
+      MapType _ EmptyInterfaceType ->
+        TypeAssertExpr want expr
+      _ ->
+        expr
+
+  SliceIndexerExpr{} ->
+    case getExprType expr of
+      SliceType EmptyInterfaceType ->
         TypeAssertExpr want expr
       _ ->
         expr
@@ -494,6 +515,9 @@ substituteVar ident sub = go
 
     StructAccessorExpr expr' ident' ->
       StructAccessorExpr (go expr') ident'
+
+    MapAccessorExpr expr' key ->
+      MapAccessorExpr (go expr') key
 
     SliceIndexerExpr expr' i ->
       SliceIndexerExpr (go expr') i
