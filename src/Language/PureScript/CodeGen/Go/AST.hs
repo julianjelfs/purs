@@ -13,6 +13,7 @@ module Language.PureScript.CodeGen.Go.AST
   , Literal(..)
   , Type(..)
   , BasicType(..)
+  , pattern ObjectType
   , Ident(..)
   , Qualified(..)
   , KeyValue
@@ -23,7 +24,6 @@ module Language.PureScript.CodeGen.Go.AST
   , getBlockType
   , typeAssert
   , objectLiteral
-  , objectType
   , emptyStructLiteral
   , emptyStructReference
   , emptyStructType
@@ -88,7 +88,7 @@ data Decl
   | TypeDecl Ident Type
   | VarDecl Ident Type Expr
   | ConstDecl Ident Type Expr
-  deriving (Eq)
+  deriving (Eq, Show)
 
 
 -- | Go type.
@@ -100,7 +100,7 @@ data Type
   | SliceType Type          -- ^ []item
   | MapType Type Type       -- ^ map[key]value
   | EmptyInterfaceType      -- ^ this gives us crude polymorphism
-  | NamedType (Qualified Ident)
+  | NamedType (Qualified Ident) -- TODO: should this also hold the type it names?
   | PointerType Type
   | PanicType Type
 
@@ -313,8 +313,15 @@ getExprType = \case
 
   StructAccessorExpr expr ident ->
     case getExprType expr of
-      StructType fields -> maybe (error $ show ident <> show fields) id (lookup ident fields)
-      other -> error ("bad struct type: " <> show other)
+      StructType fields ->
+        maybe (error $ show ident <> show fields) id (lookup ident fields)
+
+      NamedType _ ->
+        -- FIXME
+        EmptyInterfaceType
+
+      other ->
+        error ("bad struct type: " <> show other)
 
   MapAccessorExpr expr _ ->
     case getExprType expr of
@@ -340,7 +347,8 @@ getLiteralType = \case
   SliceLiteral itemType _        -> SliceType itemType
   MapLiteral keyType valueType _ -> MapType keyType valueType
   StructLiteral fields _         -> StructType fields
-  NamedStructLiteral ident _     -> NamedType ident
+  NamedStructLiteral ident _kvs  -> NamedType ident
+                                 -- StructType (fmap getExprType <$> keyValues)
 
 
 typeAssert :: Type -> Expr -> Expr
@@ -373,14 +381,14 @@ typeAssert want expr = case expr of
 
   MapAccessorExpr{} ->
     case getExprType expr of
-      MapType _ EmptyInterfaceType ->
+      EmptyInterfaceType ->
         TypeAssertExpr want expr
       _ ->
         expr
 
   SliceIndexerExpr{} ->
     case getExprType expr of
-      SliceType EmptyInterfaceType ->
+      EmptyInterfaceType ->
         TypeAssertExpr want expr
       _ ->
         expr
@@ -476,8 +484,10 @@ objectLiteral =
     fmap (first (LiteralExpr . StringLiteral))
 
 
-objectType :: Type
-objectType = MapType (BasicType StringType) EmptyInterfaceType
+-- | map[string]interface{}
+--
+pattern ObjectType :: Type
+pattern ObjectType = MapType (BasicType StringType) EmptyInterfaceType
 
 
 substituteVar :: Qualified Ident -> Expr -> Expr -> Expr

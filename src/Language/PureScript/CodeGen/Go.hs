@@ -3,7 +3,7 @@ module Language.PureScript.CodeGen.Go
   , moduleToGo
   ) where
 
-import Prelude.Compat
+import Prelude.Compat hiding (map)
 
 import qualified Data.Text as Text
 import qualified Data.Map as Map
@@ -89,7 +89,8 @@ data Context = Context
 
 newContext :: Environment.Environment -> CoreFn.Module CoreFn.Ann -> Context
 newContext env core@CoreFn.Module{..} =
-  Context core { CoreFn.moduleExports = allModuleExports } initialTypes
+  Context core { CoreFn.moduleExports = allModuleExports }
+    (names <> types <> typeClassDictionaries <> typeClasses)
   where
   allModuleExports :: [Names.Ident]
   allModuleExports = moduleExports <> exportedTypeNames
@@ -107,17 +108,61 @@ newContext env core@CoreFn.Module{..} =
 
         _ -> Nothing
 
-  initialTypes :: Map.Map (Go.Qualified Go.Ident) Go.Type
-  initialTypes = foldl' folder Map.empty $ Map.toList (Environment.names env)
+  -- Gather up types from the environment:
+
+  names :: Map.Map (Go.Qualified Go.Ident) Go.Type
+  names =
+    foldl' (flip $ uncurry folder) Map.empty (Map.toList $ Environment.names env)
     where
-    folder accum (Names.Qualified Nothing ident, (value', _, _)) =
-      let key   = unqualified (identToGo' moduleExports ident)
-          value = typeToGo' moduleName allModuleExports value'
-      in  Map.insert key value accum
-    folder accum (Names.Qualified (Just mn) ident, (value', _, _)) =
-      let key   = qualifiedToGo' moduleName moduleExports mn ident
-          value = typeToGo' moduleName allModuleExports value'
-      in  Map.insert key value accum
+    folder (Names.Qualified Nothing ident) (value', _, _) =
+      Map.insert
+        (unqualified (identToGo' moduleExports ident))
+        (typeToGo' moduleName allModuleExports value')
+    folder (Names.Qualified (Just mn) ident) (value', _, _) =
+      Map.insert
+        (qualifiedToGo' moduleName moduleExports mn ident)
+        (typeToGo' moduleName allModuleExports value')
+
+  -- TODO
+  types :: Map.Map (Go.Qualified Go.Ident) Go.Type
+  types = Map.empty -- Environment.names env
+
+  typeClassDictionaries :: Map.Map (Go.Qualified Go.Ident) Go.Type
+  typeClassDictionaries =
+    foldl' (flip $ uncurry folder) Map.empty .
+    concatMap Map.toList .
+    concatMap Map.elems .
+    Map.elems $
+    Environment.typeClassDictionaries env
+    where
+    folder (Names.Qualified Nothing ident) _ =
+      Map.insert
+        (unqualified (identToGo' moduleExports ident))
+        Go.ObjectType
+    folder (Names.Qualified (Just mn) ident) _ =
+      Map.insert
+        (qualifiedToGo' moduleName moduleExports mn ident)
+        Go.ObjectType
+
+  typeClasses :: Map.Map (Go.Qualified Go.Ident) Go.Type
+  typeClasses =
+    foldl' (flip $ uncurry folder) Map.empty (Map.toList $ Environment.typeClasses env)
+    where
+    folder (Names.Qualified Nothing className) typeClassData =
+      Map.insert
+        (unqualified (identToGo' moduleExports (unClassName className)))
+        (typeClassConstructorType typeClassData)
+    folder (Names.Qualified (Just mn) className) typeClassData =
+      Map.insert
+        (qualifiedToGo' moduleName moduleExports mn (unClassName className))
+        (typeClassConstructorType typeClassData)
+
+    typeClassConstructorType :: Environment.TypeClassData -> Go.Type
+    typeClassConstructorType =
+      foldr
+      (const $ Go.FuncType Go.EmptyInterfaceType)
+      Go.ObjectType .
+      Environment.typeClassMembers
 
 
 isExported :: MonadReader Context m => Names.Ident -> m Bool
@@ -138,8 +183,8 @@ withType ident t = Reader.local $
 
 data Bind = Bind
   { _bindAnn   :: CoreFn.Ann
-  ,  bindIdent :: Names.Ident
-  ,  bindExpr  :: CoreFn.Expr CoreFn.Ann
+  , bindIdent :: Names.Ident
+  , bindExpr  :: CoreFn.Expr CoreFn.Ann
   }
 
 
@@ -186,15 +231,13 @@ absToGo
   :: MonadReader Context m
   => (Go.Field -> Go.Type -> Go.Block -> a)
   -> Names.Ident
-  -> Types.Type
-  -> Types.Type
+  -> Go.Type
+  -> Go.Type
   -> CoreFn.Expr CoreFn.Ann
   -> m a
-absToGo done arg' argType' returnType' body' = do
+absToGo done arg' argType returnType body' = do
   let arg = localIdent arg'
-  argType <- typeToGo argType'
   let field = (arg, argType)
-  returnType <- typeToGo returnType'
   bodyExpr <- withType (unqualified arg) argType (exprToGo body')
   let body = Go.return (Go.typeAssert returnType bodyExpr)
   pure (done field returnType body)
@@ -202,17 +245,26 @@ absToGo done arg' argType' returnType' body' = do
 
 bindToGo :: MonadReader Context m => Bind -> m [Go.Decl]
 bindToGo bind = case bindExpr bind of
+  CoreFn.Abs (_, _, _, Just CoreFn.IsTypeClassConstructor) arg body ->
+    singleton <$> typeClassToDecl (bindIdent bind) arg body
+
+  -- TODO
+  CoreFn.Abs (_, _, _, Just CoreFn.IsNewtype) _ _ ->
+    error $ show (bindExpr bind)
 
   -- Top level abstractions become func declarations
-  CoreFn.Abs ann arg body ->
-     case getAnnType ann of
-       Just (FunctionApp argType returnType) -> do
+  CoreFn.Abs (_, _, Just t, _) arg body ->
+     typeToGo t >>= \case
+       Go.FuncType argType returnType -> do
          funcName <- identToGo (bindIdent bind)
          funcDecl <- absToGo (Go.FuncDecl funcName) arg argType returnType body
          pure [ funcDecl ]
 
-       Just _  -> undefined
-       Nothing -> error ("missing type for " <> show (bindIdent bind))
+       other ->
+         error ("unexpected type for " <> show (bindIdent bind) <> ": " <> show other)
+
+  CoreFn.Abs (_, _, Nothing, _) _ _ ->
+    error ("missing type for " <> show (bindIdent bind))
 
   -- Nullary data constructors become var declarations
   -- (because we only need one instance of them)
@@ -227,10 +279,23 @@ bindToGo bind = case bindExpr bind of
   CoreFn.Constructor _ann typeName constructorName (value : values ) ->
     singleton <$> constructorToDecl typeName constructorName (value :| values)
 
+  CoreFn.App ann lhs rhs -> do
+    varName <- identToGo (bindIdent bind)
+    varValue <- Go.AppExpr <$> exprToGo lhs <*> exprToGo rhs
+    case extractAnnType ann of
+      Nothing -> do
+        let varType = Go.getExprType varValue
+        let varDecl = Go.VarDecl varName varType varValue
+        pure [ varDecl ]
+      Just t -> do
+        varType <- typeToGo t
+        let varDecl = Go.VarDecl varName varType (Go.typeAssert varType varValue)
+        pure [ varDecl ]
+
   -- Anything else becomes a var declaration
   expr ->
-    case getAnnType (CoreFn.extractAnn expr) of
-      Nothing -> undefined
+    case extractAnnType (CoreFn.extractAnn expr) of
+      Nothing -> error (show expr)
       Just varType' -> do
         varName <- identToGo (bindIdent bind)
         varType <- typeToGo varType'
@@ -238,19 +303,20 @@ bindToGo bind = case bindExpr bind of
         let varDecl = Go.VarDecl varName varType varValue
         pure [ varDecl ]
 
-
 exprToGo :: MonadReader Context m => CoreFn.Expr CoreFn.Ann -> m Go.Expr
 exprToGo = \case
   CoreFn.Literal ann literal ->
     Go.LiteralExpr <$> literalToGo ann literal
 
-  CoreFn.Abs ann arg body ->
-    case getAnnType ann of
-      Just (FunctionApp argType returnType) ->
+  CoreFn.Abs (_, _, Just t, _) arg body ->
+    typeToGo t >>= \case
+      Go.FuncType argType returnType ->
         absToGo Go.AbsExpr arg argType returnType body
 
-      Just _  -> undefined
-      Nothing -> undefined
+      _other -> undefined
+
+  CoreFn.Abs (_, _, Nothing, _) _ _ ->
+    undefined
 
   CoreFn.App _ann lhs rhs ->
     Go.AppExpr <$> exprToGo lhs <*> exprToGo rhs
@@ -261,7 +327,7 @@ exprToGo = \case
       Names.Qualified (Just mn) ident -> qualifiedToGo mn ident
 
     ctxType <- lookupType varName
-    annType <- withMaybeM typeToGo (getAnnType ann)
+    annType <- withMaybeM typeToGo (extractAnnType ann)
 
     -- NOTE: prefer type information from scope because the
     -- annotation type could be misleading for our purposes.
@@ -286,6 +352,12 @@ exprToGo = \case
   CoreFn.Let _ann binds expr ->
     letToGo binds expr
 
+  CoreFn.Accessor _ann psString expr ->
+    -- NOTE: This is used for accessing type class dictionaries
+    Go.MapAccessorExpr
+      <$> exprToGo expr
+      <*> pure (Go.LiteralExpr (psStringToGo psString))
+
   -- XXX
   expr -> pure (Go.TodoExpr (show expr))
 
@@ -300,7 +372,7 @@ caseToGo
   -> m Go.Block
 caseToGo ann _ [] = do
   -- No more cases to match? Panic.
-  mbType <- withMaybeM typeToGo (getAnnType ann)
+  mbType <- withMaybeM typeToGo (extractAnnType ann)
   case mbType of
     Nothing -> undefined
     Just panicType -> pure (Go.panic panicType "Failed pattern match")
@@ -429,11 +501,14 @@ literalBinderToGo expr = \case
       _ -> undefined
 
   Literals.ObjectLiteral keyValues -> do
+    -- NOTE: I don't think we need to be checking key membership here as the
+    -- typechecker should do that for us.
+    map <- either pure exprToGo expr
     fold <$> for keyValues
       (\(psString, binder) -> do
-         let key = Go.LiteralExpr (psStringToGo psString)
-         value <- flip Go.MapAccessorExpr key <$> either pure exprToGo expr
-         mappend ([Go.notNil value], []) <$> binderToGo (Left value) binder
+           let key = Go.LiteralExpr (psStringToGo psString)
+           let expr' = Go.MapAccessorExpr map key
+           mappend ([Go.notNil expr'], []) <$> binderToGo (Left expr') binder
       )
 
 
@@ -459,7 +534,7 @@ literalToGo ann = \case
     pure (Go.BoolLiteral b)
 
   Literals.ArrayLiteral items ->
-    withMaybeM typeToGo (getAnnType ann) >>= \case
+    withMaybeM typeToGo (extractAnnType ann) >>= \case
       Just (Go.SliceType itemType) ->
         Go.SliceLiteral itemType <$> traverse exprToGo items
 
@@ -494,8 +569,9 @@ typeToGo' moduleName moduleExports = \case
   Types.ForAll _ t _ ->
     typeToGo' moduleName moduleExports t
 
-  Types.ConstrainedType _ t ->
-    typeToGo' moduleName moduleExports t
+  Types.ConstrainedType _constraint t ->
+    Go.FuncType Go.ObjectType (typeToGo' moduleName moduleExports t)
+    --          ^^^^^^^^^^^^^ dict
 
   Types.KindedType t _ ->
     typeToGo' moduleName moduleExports t
@@ -518,6 +594,9 @@ typeToGo' moduleName moduleExports = \case
   Types.TypeVar{} ->
     Go.EmptyInterfaceType
 
+  Types.TypeApp Types.TypeVar{} _ ->
+    Go.EmptyInterfaceType
+
   Types.Skolem{} ->
     Go.EmptyInterfaceType
 
@@ -525,33 +604,30 @@ typeToGo' moduleName moduleExports = \case
     Go.SliceType (typeToGo' moduleName moduleExports itemType)
 
   Types.TypeApp (Prim "Record") _ ->
-    Go.objectType
+    Go.ObjectType
 
   Types.RCons{} ->
-    Go.objectType
+    Go.ObjectType
 
   Types.REmpty{} ->
-    Go.objectType
+    Go.ObjectType
 
   Types.TypeConstructor typeConstructor ->
-    typeConstructorType typeConstructor
+    namedType unTypeName typeConstructor
 
   (head . unTypeApp -> Types.TypeConstructor typeConstructor) ->
   -- ^ NOTE: the implementation of unTypeApp makes head safe here
-    typeConstructorType typeConstructor
+    namedType unTypeName typeConstructor
 
-  unsupportedType -> undefined unsupportedType
+  unsupportedType -> error ("unsupported type: " <> show unsupportedType)
 
   where
-  typeConstructorType
-    :: Names.Qualified (Names.ProperName 'Names.TypeName) -> Go.Type
-  typeConstructorType = \case
-    Names.Qualified Nothing typeName' ->
-      let typeName = unqualified (identToGo' moduleExports $ unTypeName typeName')
-      in (Go.NamedType typeName)
-    Names.Qualified (Just mn) typeName' ->
-      let typeName = qualifiedToGo' moduleName moduleExports mn (unTypeName typeName')
-      in (Go.NamedType typeName)
+  namedType :: (a -> Names.Ident) -> Names.Qualified a -> Go.Type
+  namedType f = \case
+    Names.Qualified Nothing a ->
+      Go.NamedType . unqualified . identToGo' moduleExports $ f a
+    Names.Qualified (Just mn) a ->
+      Go.NamedType . qualifiedToGo' moduleName moduleExports mn $ f a
 
 
 -- | Convert some let bindings to a go expression.
@@ -614,6 +690,44 @@ constructorToDecl typeName' constructorName' (valuesHead :| valuesTail) = do
           returnType
           (Go.return body)
       )
+
+
+typeClassToDecl
+  :: forall m. MonadReader Context m
+  => Names.Ident
+  -> Names.Ident
+  -> CoreFn.Expr CoreFn.Ann
+  -> m Go.Decl
+typeClassToDecl className arg expr = do
+  funcName <- identToGo className
+  (returnType, body) <- go [unIdent arg] (unIdent <$> unAbs expr)
+  pure $
+    Go.FuncDecl funcName (localIdent arg, Go.EmptyInterfaceType) returnType
+      (Go.return body)
+  where
+  go :: [Text] -> [Text] -> m (Go.Type, Go.Expr)
+  go keys [] =
+    pure
+      ( Go.ObjectType
+      , Go.LiteralExpr . Go.objectLiteral $ toKeyValue <$> keys
+      )
+    where
+    toKeyValue :: Text -> Go.KeyValue Text
+    toKeyValue k =
+      ( showT k -- quoted key
+      , Go.VarExpr Go.EmptyInterfaceType (unqualified (Go.LocalIdent k))
+      )
+
+  go keys (arg' : rest) = do
+    go (arg' : keys) rest <&> \(returnType, body) ->
+      ( Go.FuncType Go.EmptyInterfaceType returnType
+      , Go.AbsExpr (Go.LocalIdent arg', Go.EmptyInterfaceType) returnType
+          (Go.return body)
+      )
+
+  unAbs :: CoreFn.Expr CoreFn.Ann -> [Names.Ident]
+  unAbs (CoreFn.Abs _ arg' val) = arg' : unAbs val
+  unAbs _ = []
 
 
 constructorToField
@@ -750,11 +864,15 @@ unConstructorName :: Names.ProperName 'Names.ConstructorName -> Names.Ident
 unConstructorName = Names.Ident . Names.runProperName
 
 
+unClassName :: Names.ProperName 'Names.ClassName -> Names.Ident
+unClassName = Names.Ident . Names.runProperName
+
+
 -- UTIL
 
 
-getAnnType :: CoreFn.Ann -> Maybe Types.Type
-getAnnType (_, _, mbType, _) = mbType
+extractAnnType :: CoreFn.Ann -> Maybe Types.Type
+extractAnnType (_, _, mbType, _) = mbType
 
 
 unTypeApp :: Types.Type -> [Types.Type]

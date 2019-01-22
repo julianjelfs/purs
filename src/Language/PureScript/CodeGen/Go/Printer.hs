@@ -310,8 +310,15 @@ printGoIdent = sanitise . \case
     [ Text.replace "'" "_" ]
 
 
+-- https://golang.org/ref/spec#Keywords
 keywords :: [Text]
-keywords = ["go"]
+keywords =
+  [ "break",        "default",      "func",         "interface",    "select"
+  , "case",         "defer",        "go",           "map",          "struct"
+  , "chan",         "else",         "goto",         "package",      "switch"
+  , "const",        "fallthrough",  "if",           "range",        "type"
+  , "continue",     "for",          "import",       "return",       "var"
+  ]
 
 
 showT :: Show a => a -> Text
