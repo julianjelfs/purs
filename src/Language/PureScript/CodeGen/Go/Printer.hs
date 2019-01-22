@@ -302,7 +302,7 @@ printGoIdent = sanitise . \case
 
   fixKeywords :: Text -> Text
   fixKeywords text
-    | text `elem` keywords = text <> "_"
+    | text `elem` keywords <> basicTypes = text <> "_"
     | otherwise = text
 
   sanitise :: Text -> Text
@@ -318,6 +318,27 @@ keywords =
   , "chan",         "else",         "goto",         "package",      "switch"
   , "const",        "fallthrough",  "if",           "range",        "type"
   , "continue",     "for",          "import",       "return",       "var"
+  ]
+
+
+-- https://tour.golang.org/basics/11
+basicTypes :: [Text]
+basicTypes =
+  [ "bool"
+
+  , "string"
+
+  , "int",  "int8",  "int16",  "int32",  "int64"
+  , "uint", "uint8", "uint16", "uint32", "uint64", "uintptr"
+
+  , "byte"
+
+  , "rune"
+
+
+  , "float32", "float64"
+
+  , "complex64", "complex128"
   ]
 
 

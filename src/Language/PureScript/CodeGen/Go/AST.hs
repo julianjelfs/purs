@@ -352,14 +352,16 @@ getLiteralType = \case
 
 
 typeAssert :: Type -> Expr -> Expr
-typeAssert EmptyInterfaceType expr = expr
---         ^ NOTE: Can't assert non-interface types
+typeAssert EmptyInterfaceType expr = expr  -- can't assert non-interface{} types
 typeAssert want expr = case expr of
   LiteralExpr{}             -> expr
-  TypeAssertExpr{}          -> expr
   ReferenceExpr{}           -> expr
   DereferenceExpr{}         -> expr
   NilExpr{}                 -> expr
+
+  TypeAssertExpr assertion _
+    | assertion /= want -> TypeAssertExpr want expr
+    | otherwise -> expr
 
   VarExpr varType _ ->
     case varType of
@@ -415,6 +417,7 @@ typeAssert want expr = case expr of
               AppExpr (typeAssert funcType lhs) (typeAssert argType rhs)
         | otherwise ->
             AppExpr (typeAssert funcType lhs) (typeAssert argType rhs)
+
       _ ->
         undefined  -- shouldn't happen
 

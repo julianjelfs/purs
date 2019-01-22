@@ -104,7 +104,12 @@ newContext env core@CoreFn.Module{..} =
     getExportedTypeName bind =
       case bindExpr bind of
         CoreFn.Constructor _ typeName _ _
-          | bindIdent bind `elem` moduleExports -> Just typeName
+          | bindIdent bind `elem` moduleExports ->
+              Just typeName
+
+        CoreFn.Abs (_, _, _, Just CoreFn.IsNewtype) _ _
+          | bindIdent bind `elem` moduleExports ->
+              Just . identToProperName . bindIdent $ bind
 
         _ -> Nothing
 
@@ -248,9 +253,8 @@ bindToGo bind = case bindExpr bind of
   CoreFn.Abs (_, _, _, Just CoreFn.IsTypeClassConstructor) arg body ->
     singleton <$> typeClassToDecl (bindIdent bind) arg body
 
-  -- TODO
-  CoreFn.Abs (_, _, _, Just CoreFn.IsNewtype) _ _ ->
-    error $ show (bindExpr bind)
+  CoreFn.Abs (_, _, _, Just CoreFn.IsNewtype) _ _ -> do
+    newtypeToGo (bindIdent bind)
 
   -- Top level abstractions become func declarations
   CoreFn.Abs (_, _, Just t, _) arg body ->
@@ -455,6 +459,22 @@ binderToGo expr = \case
             (\ident binder -> binderToGo (Left $ Go.StructAccessorExpr construct ident) binder)
             idents binders
 
+      (_, _, _, Just CoreFn.IsNewtype) ->
+        case binders of
+          [ CoreFn.VarBinder _ ident ] -> do
+            expr' <- either pure exprToGo expr
+            let reset = Go.TypeAssertExpr Go.EmptyInterfaceType expr'
+            --             ^^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^^^^
+            -- By forcing the expression to have an interface{} type we make
+            -- ensure that it is asserted to the underlying type elsewhere.
+            -- So basically type assertions are our method of unwrapping.
+            --
+            -- NOTE: If NamedTypes carried information about the types they
+            -- wrapped we could optimize this intermediate conversion away...
+            pure ([], [(localVar ident, reset)])
+
+          _ ->
+            undefined
       _ ->
         undefined
 
@@ -751,6 +771,27 @@ constructorToField constructorName values =
     pure $ Go.PointerType (Go.StructType (valueToField <$> values))
 
 
+newtypeToGo :: forall m. MonadReader Context m => Names.Ident -> m [Go.Decl]
+newtypeToGo ident = sequence [ typeDecl, funcDecl ]
+  where
+  typeName :: m Go.Ident
+  typeName = typeNameToGo (identToProperName ident)
+
+  typeDecl :: m Go.Decl
+  typeDecl = flip Go.TypeDecl Go.EmptyInterfaceType <$> typeName
+
+  funcDecl :: m Go.Decl
+  funcDecl = do
+    funcName <- identToGo ident
+    typeName' <- unqualified <$> typeName
+    let arg = Go.LocalIdent "x"
+    let field = (arg, Go.EmptyInterfaceType)
+    let returnType = Go.NamedType typeName'
+    let ctor = Go.VarExpr (Go.FuncType Go.EmptyInterfaceType returnType) typeName'
+    let body = Go.AppExpr ctor (Go.VarExpr Go.EmptyInterfaceType (unqualified arg))
+    pure (Go.FuncDecl funcName field returnType (Go.return body))
+
+
 psStringToGo :: PSString -> Go.Literal
 psStringToGo = Go.StringLiteral . showT
 
@@ -866,6 +907,10 @@ unConstructorName = Names.Ident . Names.runProperName
 
 unClassName :: Names.ProperName 'Names.ClassName -> Names.Ident
 unClassName = Names.Ident . Names.runProperName
+
+
+identToProperName :: Names.Ident -> Names.ProperName a
+identToProperName = Names.ProperName . unIdent
 
 
 -- UTIL
