@@ -408,15 +408,20 @@ typeAssert want expr = case expr of
   AbsExpr param result body ->
     AbsExpr param result (mapBlock (typeAssert result) body)
 
-  -- This case is tricky...
   AppExpr lhs rhs ->
     case getExprType lhs of
-      funcType@(FuncType argType returnType)
-        | returnType == EmptyInterfaceType ->
-            TypeAssertExpr want $
-              AppExpr (typeAssert funcType lhs) (typeAssert argType rhs)
-        | otherwise ->
-            AppExpr (typeAssert funcType lhs) (typeAssert argType rhs)
+      funcType@(FuncType EmptyInterfaceType EmptyInterfaceType) ->
+        -- If the function accepts an interface{} then there's no point asserting
+        TypeAssertExpr want (AppExpr (typeAssert funcType lhs) (unAssert rhs))
+
+      funcType@(FuncType argType EmptyInterfaceType) ->
+        TypeAssertExpr want (AppExpr (typeAssert funcType lhs) (typeAssert argType rhs))
+
+      funcType@(FuncType EmptyInterfaceType _) ->
+        AppExpr (typeAssert funcType lhs) (unAssert rhs)
+
+      funcType@(FuncType argType _) ->
+        AppExpr (typeAssert funcType lhs) (typeAssert argType rhs)
 
       _ ->
         undefined  -- shouldn't happen
@@ -469,6 +474,36 @@ wrapFunc expr = go []
 
   -- Shouldn't really get here...
   go _ _ = expr
+
+
+unAssert :: Expr -> Expr
+unAssert expr = case expr of
+  LiteralExpr{}        -> expr
+  BoolOpExpr{}         -> expr
+  VarExpr{}            -> expr
+  StructAccessorExpr{} -> expr
+  MapAccessorExpr{}    -> expr
+  SliceIndexerExpr{}   -> expr
+  NilExpr{}            -> expr
+  TodoExpr{}           -> expr
+
+  AbsExpr field t block ->
+    AbsExpr field t (mapBlock unAssert block)
+
+  AppExpr lhs rhs ->
+    AppExpr (unAssert lhs) (unAssert rhs)
+
+  BlockExpr block ->
+    BlockExpr (mapBlock unAssert block)
+
+  TypeAssertExpr _ expr' ->
+    unAssert expr'
+
+  ReferenceExpr expr' ->
+    ReferenceExpr (unAssert expr')
+
+  DereferenceExpr expr' ->
+    DereferenceExpr (unAssert expr')
 
 
 letExpr :: Ident -> Expr -> Expr -> Expr
